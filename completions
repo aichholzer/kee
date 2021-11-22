@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+
+# Bash completions for Kee
+if ! command -v kee &> /dev/null; then
+  return
+fi
+
+__kee_options() {
+  OPTIONS=''
+  __kee_completions "${OPTIONS}"
+}
+
+__kee_completions() {
+  local current_word
+  current_word="${COMP_WORDS[COMP_CWORD]}"
+  COMPREPLY=($(compgen -W "$1" -- "${current_word}"))
+  return 0
+}
+
+__kee_commands() {
+  local current_word
+  local command
+
+  current_word="${COMP_WORDS[COMP_CWORD]}"
+  COMMANDS='add remove show use ls export tf'
+  TF_COMMANDS='init validate plan apply refresh console'
+
+  if [ ${#COMP_WORDS[@]} = 2 ]; then
+    command="${COMP_WORDS[COMP_CWORD - 1]}"
+    if [ ${command} = "ls" ] || [ ${command} = "add" ]; then
+      return
+    elif [ ${command} = "tf" ]; then
+      case "${current_word}" in
+        -*) __kee_options ;;
+        *) __kee_completions "${TF_COMMANDS}" ;;
+      esac
+    else
+      case "${current_word}" in
+        -*) __kee_options ;;
+        *) __kee_completions "${COMMANDS}" ;;
+      esac
+    fi
+  elif [ ${#COMP_WORDS[@]} -lt 3 ]; then
+    case "${current_word}" in
+      -*) __kee_options ;;
+      *) __kee_completions "${COMMANDS}" ;;
+    esac
+  fi
+}
+
+__kee_accounts() {
+  local accounts
+  accounts="$(echo $(__loadAccounts) | jq -r '.[] | .profile')"
+  __kee_completions "$(echo $accounts)"
+}
+
+__kee() {
+  local previous_word
+  previous_word="${COMP_WORDS[COMP_CWORD - 1]}"
+
+  case "${previous_word}" in
+    show | remove | use | export) __kee_accounts ;;
+    *) __kee_commands ;;
+  esac
+
+  return 0
+}
+
+# complete is a bash builtin, but recent versions of ZSH come with a function
+# called bashcompinit that will create a complete in ZSH. If the user is in
+# ZSH, load and run bashcompinit before calling the complete function.
+if [[ -n ${ZSH_VERSION-} ]]; then
+  # Calling compinit first and then bashcompinit as mentioned by zsh man page.
+  autoload -U +X compinit && if [[ ${ZSH_DISABLE_COMPFIX-} = true ]]; then
+    compinit -u
+  else
+    compinit
+  fi
+  autoload -U +X bashcompinit && bashcompinit
+fi
+
+complete -o defaultKee -F __kee kee
