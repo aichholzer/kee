@@ -38,6 +38,7 @@ function kee () {
   local ACCOUNTS
   local RUN
   local TEMP=false
+  local TF_AUTO_APPROVE=""
 
   ## Parse special CLI arguments.
   while [ $# -gt 0 ]; do
@@ -47,6 +48,9 @@ function kee () {
         ;;
       -t|--temp)
         TEMP=true
+        ;;
+      --approve)
+        TF_AUTO_APPROVE="-auto-approve"
         ;;
       *)
     esac
@@ -196,9 +200,9 @@ function kee () {
     ACTION=${PROFILE}
     [ ! "${ACTION}" ] && ACTION=init
 
-    ACTIONS=("validate plan apply refresh console")
+    ACTIONS=("validate plan apply destroy refresh console")
     if [[ " ${ACTIONS[*]} " =~ " ${ACTION} " ]]; then
-      terraform ${ACTION} -var-file=${ENVIRONMENT}.tfvars
+      terraform ${ACTION} ${TF_AUTO_APPROVE} -var-file=${ENVIRONMENT}.tfvars
     elif [ "${ACTION}" = "init" ]; then
       echo
       READ_BUCKET_NAME=false
@@ -214,7 +218,9 @@ function kee () {
           read "SAVE_BUCKET_NAME? Did you want to save this bucket to the current profile? "
 
           if [ "${SAVE_BUCKET_NAME}" = "yes" ]; then
-            echo $(cat ${ACCOUNTS} | jq -r 'map((select(.profile=="'${AWS_PROFILE}'") | .properties.terraform_bucket) |= "'${TERRAFORM_BUCKET}'")') > ${ACCOUNTS}
+            ACCOUNTS=$(echo $(__loadAccounts))
+            ACCOUNTS=$(echo ${ACCOUNTS} | jq -c 'map((select(.profile=="'${AWS_PROFILE}'") | .properties.terraform_bucket) |= "'${TERRAFORM_BUCKET}'")')
+            __storeAccounts ${ACCOUNTS}
           fi
         fi
       else
