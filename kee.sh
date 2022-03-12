@@ -114,6 +114,7 @@ function kee () {
 
     ## Write the account to the AWS CLI config files.
     echo "\n[profile ${PROFILE}]\nregion = ${REGION}\noutput = ${OUTPUT}" >> ~/.aws/config
+    echo "\n[${PROFILE}]\naws_access_key_id = ${ACCESS_KEY}\naws_secret_access_key = ${SECRET_ACCESS_KEY}" >> ~/.aws/credentials
 
     return
   elif [ "${COMMAND}" = "remove" ]; then
@@ -136,6 +137,7 @@ function kee () {
 
       ## Remove the account to the AWS CLI config files.
       sed -i '' '/\[profile '${PROFILE}'\]/,/^$/d' ~/.aws/*
+      sed -i '' '/\['${PROFILE}'\]/,/^$/d' ~/.aws/*
       sed -i '' 'N;/^\n$/d;P;D' ~/.aws/*
 
       kee ls
