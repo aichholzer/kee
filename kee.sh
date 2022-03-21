@@ -65,6 +65,7 @@ function kee () {
   done
 
   if [ "${COMMAND}" = "ls" ]; then
+    ## TODO: Add `[sso]` to listed SSO accounts.
     echo ""
     ACCOUNTS=$(echo $(__loadAccounts) | jq -r '.[] | .profile' | sed "s/\w*/ • /")
     [ ! "${ACCOUNTS}" ] && echo " 💥 No accounts have been found.\n    Get started with: kee add ..." || echo ${ACCOUNTS}
@@ -79,18 +80,16 @@ function kee () {
       local ACCOUNT_TYPE=$(__getProp ${ACCOUNT} type)
 
       echo
-      echo " • Profile: \t\t${PROFILE}"
-      echo " • Account ID: \t$(__getProp ${ACCOUNT} account)"
+      echo " • Profile: \t\t${PROFILE}" $([ "${ACCOUNT_TYPE}" = "sso" ] && echo "[${ACCOUNT_TYPE}]")
+      echo " • Account ID: \t\t$(__getProp ${ACCOUNT} account)"
       echo " • Region: \t\t$(__getProp ${ACCOUNT} region)"
+      echo " • Environment: \t$(__getProp ${ACCOUNT} environment)"
 
-      if [ "${ACCOUNT_TYPE}" = "sso" ]; then
-        echo " • Type: \t\tSSO"
-      else
+      if [ ! "${ACCOUNT_TYPE}" = "sso" ]; then
         echo " • Access key: \t\t$(__getProp ${ACCOUNT} access_key mask 15)"
         echo " • Secret access key: \t$(__getProp ${ACCOUNT} secret_access_key mask 15)"
       fi
 
-      echo " • Environment: \t$(__getProp ${ACCOUNT} environment)"
       local DOMAIN=$(__getProp ${ACCOUNT} domain)
       [ "${DOMAIN}" ] && echo " • Domain: \t\t${DOMAIN}"
     fi
