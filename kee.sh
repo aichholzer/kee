@@ -46,12 +46,19 @@ function kee () {
       -r|--run)
         RUN="${2}"
         ;;
+
       -t|--temp)
         TEMP=true
         ;;
+
       --approve)
         TF_AUTO_APPROVE="-auto-approve"
         ;;
+
+      --sso)
+        SSO=true
+        ;;
+
       *)
     esac
     shift
@@ -69,12 +76,20 @@ function kee () {
       ACCOUNT=$(__loadAccount ${PROFILE})
       [ ! "${ACCOUNT}" ] && echo "\n 💥 This profile does not exist." && return
 
+      local ACCOUNT_TYPE=$(__getProp ${ACCOUNT} type)
+
       echo
       echo " • Profile: \t\t${PROFILE}"
-      echo " • Account ID: \t\t$(__getProp ${ACCOUNT} account)"
+      echo " • Account ID: \t$(__getProp ${ACCOUNT} account)"
       echo " • Region: \t\t$(__getProp ${ACCOUNT} region)"
-      echo " • Access key: \t\t$(__getProp ${ACCOUNT} access_key mask 15)"
-      echo " • Secret access key: \t$(__getProp ${ACCOUNT} secret_access_key mask 15)"
+
+      if [ "${ACCOUNT_TYPE}" = "sso" ]; then
+        echo " • Type: \t\tSSO"
+      else
+        echo " • Access key: \t\t$(__getProp ${ACCOUNT} access_key mask 15)"
+        echo " • Secret access key: \t$(__getProp ${ACCOUNT} secret_access_key mask 15)"
+      fi
+
       echo " • Environment: \t$(__getProp ${ACCOUNT} environment)"
       local DOMAIN=$(__getProp ${ACCOUNT} domain)
       [ "${DOMAIN}" ] && echo " • Domain: \t\t${DOMAIN}"
@@ -85,36 +100,62 @@ function kee () {
     [ ! "${PROFILE}" ] && echo "\n 💥 You need to specify an account name." && return
 
     echo "\n Profile name: ${PROFILE}"
-    read "ACCOUNT_ID? Account ID: "
-    read "ACCESS_KEY? Access key: "
-    read "SECRET_ACCESS_KEY? Secret access key: "
-    read "DOMAIN? Domain: "
     read "REGION? Region (Default: "ap-southeast-2"): "
     read "OUTPUT? Output (Default: "json"): "
+    read "DOMAIN? Domain: "
     read "ENVIRONMENT? Environment (Default: "dev"): "
 
     [ ! "${REGION}" ] && REGION=ap-southeast-2
     [ ! "${OUTPUT}" ] && OUTPUT=json
     [ ! "${ENVIRONMENT}" ] && ENVIRONMENT=dev
 
-    ACCOUNTS=$(echo $(__loadAccounts '[]') | jq -c '. + [{
-      "profile": "'${PROFILE}'",
-      "properties": {
-        "account": "'${ACCOUNT_ID}'",
-        "access_key": "'${ACCESS_KEY}'",
-        "secret_access_key": "'${SECRET_ACCESS_KEY}'",
-        "region": "'${REGION}'",
-        "output": "'${OUTPUT}'",
-        "domain": "'${DOMAIN}'",
-        "environment": "'${ENVIRONMENT}'"
-      }
-    }]')
+    if [ "${SSO}" ]; then
+      echo "\n Configure your SSO account: ${PROFILE}"
 
-    __storeAccounts ${ACCOUNTS}
+      aws configure sso --profile ${PROFILE}
 
-    ## Write the account to the AWS CLI config files.
-    echo "\n[profile ${PROFILE}]\nregion = ${REGION}\noutput = ${OUTPUT}" >> ~/.aws/config
-    echo "\n[${PROFILE}]\naws_access_key_id = ${ACCESS_KEY}\naws_secret_access_key = ${SECRET_ACCESS_KEY}" >> ~/.aws/credentials
+      ACCOUNT_ID=`aws configure get sso_account_id --profile ${PROFILE}`
+      START_URL=`aws configure get sso_start_url --profile ${PROFILE}`
+
+      ACCOUNTS=$(echo $(__loadAccounts '[]') | jq -c '. + [{
+        "profile": "'${PROFILE}'",
+        "properties": {
+          "type": "sso",
+          "account": "'${ACCOUNT_ID}'",
+          "start_url": "'${START_URL}'",
+          "region": "'${REGION}'",
+          "output": "'${OUTPUT}'",
+          "domain": "'${DOMAIN}'",
+          "environment": "'${ENVIRONMENT}'"
+        }
+      }]')
+
+      __storeAccounts ${ACCOUNTS}
+
+    else
+      read "ACCOUNT_ID? Account ID: "
+      read "ACCESS_KEY? Access key: "
+      read "SECRET_ACCESS_KEY? Secret access key: "
+
+      ACCOUNTS=$(echo $(__loadAccounts '[]') | jq -c '. + [{
+        "profile": "'${PROFILE}'",
+        "properties": {
+          "account": "'${ACCOUNT_ID}'",
+          "access_key": "'${ACCESS_KEY}'",
+          "secret_access_key": "'${SECRET_ACCESS_KEY}'",
+          "region": "'${REGION}'",
+          "output": "'${OUTPUT}'",
+          "domain": "'${DOMAIN}'",
+          "environment": "'${ENVIRONMENT}'"
+        }
+      }]')
+
+      __storeAccounts ${ACCOUNTS}
+
+      ## Write the account to the AWS CLI config files.
+      echo "\n[profile ${PROFILE}]\nregion = ${REGION}\noutput = ${OUTPUT}" >> ~/.aws/config
+      echo "\n[${PROFILE}]\naws_access_key_id = ${ACCESS_KEY}\naws_secret_access_key = ${SECRET_ACCESS_KEY}" >> ~/.aws/credentials
+    fi
 
     return
   elif [ "${COMMAND}" = "remove" ]; then
@@ -184,6 +225,23 @@ function kee () {
           kee tf
       fi
     fi
+  elif [ "${COMMAND}" = "login" ]; then
+    ACCOUNT=$(__loadAccount ${PROFILE})
+    [ ! "${ACCOUNT}" ] && echo "\n 💥 This profile does not exist." && return
+    local ACCOUNT_TYPE=$(__getProp ${ACCOUNT} type)
+    [ ! "${ACCOUNT_TYPE}" = "sso" ] && echo "\n 💥 This is not an SSO account, can't login." && return
+
+    aws sso login --profile ${PROFILE}
+
+    export AWS_PROFILE=${PROFILE}
+    export AWS_DEFAULT_PROFILE=${PROFILE}
+    export AWS_ACCOUNT_ID=$(__getProp ${ACCOUNT} account)
+    export AWS_REGION=$(__getProp ${ACCOUNT} region)
+    export DOMAIN=$(__getProp ${ACCOUNT} domain)
+    export ENVIRONMENT=$(__getProp ${ACCOUNT} environment)
+    export TERRAFORM_BUCKET=$(__getProp ${ACCOUNT} terraform_bucket)
+
+    echo "\n ✔ Now logged in and using SSO profile \"${PROFILE}\""
   elif [ "${COMMAND}" = "export" ]; then
     local SAFETY_NOTICE="\n ⚠️  You are about to export PLACEHOLDER. Make sure you keep this output safe & secure."
     if [ ! "${PROFILE}" ]; then

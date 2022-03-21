@@ -22,7 +22,7 @@ __kee_commands() {
   local command
 
   current_word="${COMP_WORDS[COMP_CWORD]}"
-  COMMANDS='add remove show use ls export tf'
+  COMMANDS='add remove show use login ls export tf'
   TF_COMMANDS='init validate plan apply destroy refresh console'
 
   if [ ${#COMP_WORDS[@]} = 2 ]; then
@@ -50,7 +50,12 @@ __kee_commands() {
 
 __kee_accounts() {
   local accounts
-  accounts="$(echo $(__loadAccounts) | jq -r '.[] | .profile')"
+  if [ "${1}" == "sso" ]; then
+    accounts="$(echo $(__loadAccounts) | jq -r '.[] | select(.properties.type == "sso") | .profile')"
+  else
+    accounts="$(echo $(__loadAccounts) | jq -r '.[] | .profile')"
+  fi
+
   __kee_completions "$(echo $accounts)"
 }
 
@@ -60,6 +65,7 @@ __kee() {
 
   case "${previous_word}" in
     show | remove | use | export) __kee_accounts ;;
+    login) __kee_accounts "sso";;
     *) __kee_commands ;;
   esac
 
