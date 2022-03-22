@@ -47,9 +47,7 @@ function kee () {
   ## Parse special CLI arguments.
   while [ $# -gt 0 ]; do
     case "${1}" in
-      run)
-        COMMAND="run"
-        PROFILE=""
+      -r|--run)
         RUN="${2}"
         ;;
 
@@ -167,7 +165,6 @@ function kee () {
       echo "\n[${PROFILE}]\naws_access_key_id = ${ACCESS_KEY}\naws_secret_access_key = ${SECRET_ACCESS_KEY}" >> ~/.aws/credentials
     fi
 
-    return
   elif [ "${COMMAND}" = "remove" ]; then
     ACCOUNT=$(__loadAccount ${PROFILE})
     [ ! "${ACCOUNT}" ] && echo "\n 💥 This profile does not exist, nothing to remove..." && return
@@ -186,7 +183,7 @@ function kee () {
         unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
       fi
 
-      ## Remove the account to the AWS CLI config files.
+      ## Remove the account from the AWS CLI config files.
       sed -i '' '/\[profile '${PROFILE}'\]/,/^$/d' ~/.aws/*
       sed -i '' '/\['${PROFILE}'\]/,/^$/d' ~/.aws/*
       sed -i '' 'N;/^\n$/d;P;D' ~/.aws/*
@@ -214,59 +211,13 @@ function kee () {
         echo "   Initializing the current Terraform environment: \"${ENVIRONMENT}\""
         kee tf
     fi
-  elif [ "${COMMAND}" = "run" ]; then
-    if [ ! "${PROFILE}" ] && [ ! "${AWS_PROFILE}" ]; then
-      echo "\n 💥 No profile is currently selected."
-    else
-      [ ! "${PROFILE}" ] && PROFILE=${AWS_PROFILE}
-      ACCOUNT=$(__loadAccount ${PROFILE})
-      [ ! "${ACCOUNT}" ] && echo "\n 💥 This profile does not exist." && return
-
-      RUN=($(echo ${RUN} | tr " " "\n"))
-
-      ## If a "run" command was specified:
-      ## - obtain a short-lived set of credentials through AWS STS,
-      ## - expose the credentials to the sub-process only,
-      ## - run the command
-      local ACCOUNT_TYPE=$(__getProp ${ACCOUNT} type)
-      if [ "${ACCOUNT_TYPE}" = "sso" ]; then
-        ## Find the session file for the current account
-        local START_URL=$(__getProp ${ACCOUNT} start_url)
-
-        local ACCOUNT_ID=$(__getProp ${ACCOUNT} account)
-        local ROLE_NAME=$(__getProp ${ACCOUNT} role_name)
-        local REGION=$(__getProp ${ACCOUNT} region)
-        local ACCESS_TOKEN=$(cat $(grep -Rl "${START_URL}" "${HOME}"/.aws/sso/cache/*) | jq -r '.accessToken')
-
-        local CREDENTIALS=$(echo $(aws sso get-role-credentials --account-id "${ACCOUNT_ID}" --role-name "${ROLE_NAME}" --access-token "${ACCESS_TOKEN}" --region "${REGION}") | jq -r '.roleCredentials')
-        local AK=$(echo "${CREDENTIALS}" | jq -r '.accessKeyId')
-        local SK=$(echo "${CREDENTIALS}" | jq -r '.secretAccessKey')
-
-        (AWS_ACCESS_KEY_ID=${AK} AWS_SECRET_ACCESS_KEY=${SK} "${RUN[@]}")
-      else
-        local AK=$(__getProp ${ACCOUNT} access_key)
-        local SK=$(__getProp ${ACCOUNT} secret_access_key)
-
-        ## Generate a temporary set of credentials to perform this action
-        if [ "${TEMP}" = true ]; then
-          local TC=$(AWS_ACCESS_KEY_ID=${AK} AWS_SECRET_ACCESS_KEY=${SK} aws sts get-session-token --duration-seconds 900 --output json | jq -r '.Credentials')
-          TC=(${$(echo ${TC} | jq -r '.AccessKeyId, .SecretAccessKey, .SessionToken')//$'\n'/ })
-          TC=($(echo ${TC} | tr " " "\n"))
-          (AWS_ACCESS_KEY_ID=${TC[1]} AWS_SECRET_ACCESS_KEY=${TC[2]} AWS_SESSION_TOKEN=${TC[3]} "${RUN[@]}")
-        else
-          (AWS_ACCESS_KEY_ID=${AK} AWS_SECRET_ACCESS_KEY=${SK} "${RUN[@]}")
-        fi
-      fi
-
-    fi
-
   elif [ "${COMMAND}" = "login" ]; then
     ACCOUNT=$(__loadAccount ${PROFILE})
     [ ! "${ACCOUNT}" ] && echo "\n 💥 This profile does not exist." && return
     local ACCOUNT_TYPE=$(__getProp ${ACCOUNT} type)
     [ ! "${ACCOUNT_TYPE}" = "sso" ] && echo "\n 💥 This is not an SSO account, can't login." && return
 
-    aws sso login --profile ${PROFILE} &&
+    aws sso login --profile ${PROFILE} > /dev/null &&
     aws sts get-caller-identity > /dev/null &&
 
     export AWS_PROFILE=${PROFILE}
@@ -323,6 +274,62 @@ function kee () {
         terraform init
       fi
     fi
+  elif [ "${RUN}" ]; then
+    PROFILE=${AWS_PROFILE}
+    ACCOUNT=$(__loadAccount ${PROFILE})
+    [ ! "${ACCOUNT}" ] && echo "\n 💥 This profile does not exist." && return
+
+    RUN=($(echo ${RUN} | tr " " "\n"))
+
+    local TC=""
+    local ACCOUNT_TYPE=$(__getProp ${ACCOUNT} type)
+    if [ "${ACCOUNT_TYPE}" = "sso" ]; then
+      local START_URL=$(__getProp ${ACCOUNT} start_url)
+      local ACCOUNT_ID=$(__getProp ${ACCOUNT} account)
+      local ROLE_NAME=$(__getProp ${ACCOUNT} role_name)
+      local REGION=$(__getProp ${ACCOUNT} region)
+
+      ## Find the session file for the current account,
+      ## and extract the access token from it.
+      local ACCESS_TOKEN=$(cat $(grep -Rl "${START_URL}" "${HOME}"/.aws/sso/cache/*) | jq -r '.accessToken')
+
+      ## Get the credentials for the SSL role.
+      TC=$(echo $(aws sso get-role-credentials --account-id "${ACCOUNT_ID}" --role-name "${ROLE_NAME}" --access-token "${ACCESS_TOKEN}" --region "${REGION}") | jq -r '.roleCredentials')
+      TC=(${$(echo ${TC} | jq -r '.accessKeyId, .secretAccessKey, .sessionToken')})
+
+      ## Temporarily write the credentials to the AWS credentials file
+      ## Some tools, like Serverless still rely on the information from `.aws/credentials`.
+      ## https://github.com/serverless/serverless/issues/7567
+      ## https://github.com/aws/aws-sdk-js/issues/2772
+      ## https://github.com/serverless-stack/serverless-stack/issues/313
+      echo "\n[${PROFILE}]\naws_access_key_id = ${TC[1]}\naws_secret_access_key = ${TC[2]}\naws_session_token = ${TC[3]}" >> ~/.aws/credentials
+      (AWS_ACCESS_KEY_ID=${TC[1]} AWS_SECRET_ACCESS_KEY=${TC[2]} AWS_SESSION_TOKEN=${TC[3]} "${RUN[@]}")
+    else
+      local AK=$(__getProp ${ACCOUNT} access_key)
+      local SK=$(__getProp ${ACCOUNT} secret_access_key)
+
+      ## - Obtain a short-lived set of credentials through AWS STS,
+      ## - expose the credentials to the sub-process only,
+      ## - run the command
+      if [ "${TEMP}" = true ]; then
+        TC=$(AWS_ACCESS_KEY_ID=${AK} AWS_SECRET_ACCESS_KEY=${SK} aws sts get-session-token --duration-seconds 900 --output json | jq -r '.Credentials')
+        TC=(${$(echo ${TC} | jq -r '.AccessKeyId, .SecretAccessKey, .SessionToken')})
+        TC=($(echo ${TC} | tr " " "\n"))
+
+        ## See comment above.
+        echo "\n[${PROFILE}]\naws_access_key_id = ${TC[1]}\naws_secret_access_key = ${TC[2]}\naws_session_token = ${TC[3]}" >> ~/.aws/credentials
+        (AWS_ACCESS_KEY_ID=${TC[1]} AWS_SECRET_ACCESS_KEY=${TC[2]} AWS_SESSION_TOKEN=${TC[3]} "${RUN[@]}")
+      else
+        ## See comment above.
+        echo "\n[${PROFILE}]\naws_access_key_id = ${TC[1]}\naws_secret_access_key = ${TC[2]}" >> ~/.aws/credentials
+        (AWS_ACCESS_KEY_ID=${AK} AWS_SECRET_ACCESS_KEY=${SK} "${RUN[@]}")
+      fi
+    fi
+
+    ## Remove the credentials from the AWS CLI config files.
+    sed -i '' '/\[profile '${PROFILE}'\]/,/^$/d' ~/.aws/credentials
+    sed -i '' '/\['${PROFILE}'\]/,/^$/d' ~/.aws/credentials
+    sed -i '' 'N;/^\n$/d;P;D' ~/.aws/credentials
   else
     echo "\n 💥 You need to give me a command."
 

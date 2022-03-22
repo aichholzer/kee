@@ -51,8 +51,8 @@ kee [options] [flags]
 
 ##### Flags
 
- * `-r|--run 'command'`: Environment variables will be exposed to the sub-process which will run the command.
- * `-t|--temp`: Used in conjunction with `--run`. Request a set of temporary credentials and expose them to the sub-process.
+ * `-r|--run 'command'`: It will use the current profile. Credentials will be exposed to the sub-process which will run the command. Additionally, a `./aws/credentials` file will be temporarily populated with these credentials to support legacy requirements. (The credentials will be expunged after the command runs).
+ * `-t|--temp`: Used in conjunction with `--run`. Request a set of temporary credentials and expose them to the sub-process. (Available for non-SSO accounts).
  * `--sso`: When adding a new account, set it being SSO. When adding SSO accounts, the `AWS CLI` will be invoked to complete the configuration process.
 
 
@@ -62,8 +62,9 @@ kee [options] [flags]
 kee add example
 ...
 
-kee use example --run 'aws s3 ls'
-kee use example --run 'aws s3 ls' --temp
+kee --run 'aws s3 ls'
+kee --run 'aws s3 ls' --temp
+kee --run 'serverless deploy' --temp
 ```
 
 
