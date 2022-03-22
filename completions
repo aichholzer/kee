@@ -22,7 +22,7 @@ __kee_commands() {
   local command
 
   current_word="${COMP_WORDS[COMP_CWORD]}"
-  COMMANDS='add remove show use login ls export tf'
+  COMMANDS='add remove show use login ls run export tf'
   TF_COMMANDS='init validate plan apply destroy refresh console'
 
   if [ ${#COMP_WORDS[@]} = 2 ]; then

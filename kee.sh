@@ -31,6 +31,10 @@ function __getProp () {
   [ "${3}" = "mask" ] && echo $(__mask ${VALUE} ${4}) || echo ${VALUE}
 }
 
+function __bold () {
+  echo -e "\033[1m${1}\033[0m"
+}
+
 function kee () {
   local COMMAND=${1}
   local PROFILE=${2}
@@ -43,7 +47,9 @@ function kee () {
   ## Parse special CLI arguments.
   while [ $# -gt 0 ]; do
     case "${1}" in
-      -r|--run)
+      run)
+        COMMAND="run"
+        PROFILE=""
         RUN="${2}"
         ;;
 
@@ -80,18 +86,21 @@ function kee () {
       local ACCOUNT_TYPE=$(__getProp ${ACCOUNT} type)
 
       echo
-      echo " • Profile: \t\t${PROFILE}" $([ "${ACCOUNT_TYPE}" = "sso" ] && echo "[${ACCOUNT_TYPE}]")
-      echo " • Account ID: \t\t$(__getProp ${ACCOUNT} account)"
-      echo " • Region: \t\t$(__getProp ${ACCOUNT} region)"
-      echo " • Environment: \t$(__getProp ${ACCOUNT} environment)"
-
-      if [ ! "${ACCOUNT_TYPE}" = "sso" ]; then
-        echo " • Access key: \t\t$(__getProp ${ACCOUNT} access_key mask 15)"
-        echo " • Secret access key: \t$(__getProp ${ACCOUNT} secret_access_key mask 15)"
-      fi
+      echo " • $(__bold Profile:) \t${PROFILE}" $([ "${ACCOUNT_TYPE}" = "sso" ] && echo "[${ACCOUNT_TYPE}]")
+      echo " • $(__bold Account ID:) \t$(__getProp ${ACCOUNT} account)"
+      echo " • $(__bold Region:) \t$(__getProp ${ACCOUNT} region)"
+      echo " • $(__bold Environment:) $(__getProp ${ACCOUNT} environment)"
 
       local DOMAIN=$(__getProp ${ACCOUNT} domain)
-      [ "${DOMAIN}" ] && echo " • Domain: \t\t${DOMAIN}"
+      [ "${DOMAIN}" ] && echo " • $(__bold Domain:) \t\t${DOMAIN}"
+
+      if [ ! "${ACCOUNT_TYPE}" = "sso" ]; then
+        echo " • $(__bold Access key:) \t$(__getProp ${ACCOUNT} access_key mask 15)"
+        echo " • $(__bold Secret access key:) \t$(__getProp ${ACCOUNT} secret_access_key mask 15)"
+      else
+        echo " • $(__bold Role name:) \t$(__getProp ${ACCOUNT} role_name)"
+        echo " • $(__bold Start url:) \t$(__getProp ${ACCOUNT} start_url)"
+      fi
     fi
 
     return
@@ -115,6 +124,7 @@ function kee () {
 
       ACCOUNT_ID=`aws configure get sso_account_id --profile ${PROFILE}`
       START_URL=`aws configure get sso_start_url --profile ${PROFILE}`
+      ROLE_NAME=`aws configure get sso_role_name --profile ${PROFILE}`
 
       ACCOUNTS=$(echo $(__loadAccounts '[]') | jq -c '. + [{
         "profile": "'${PROFILE}'",
@@ -125,7 +135,8 @@ function kee () {
           "region": "'${REGION}'",
           "output": "'${OUTPUT}'",
           "domain": "'${DOMAIN}'",
-          "environment": "'${ENVIRONMENT}'"
+          "environment": "'${ENVIRONMENT}'",
+          "role_name": "'${ROLE_NAME}'"
         }
       }]')
 
@@ -186,51 +197,77 @@ function kee () {
     ACCOUNT=$(__loadAccount ${PROFILE})
     [ ! "${ACCOUNT}" ] && echo "\n 💥 This profile does not exist." && return
 
-    ## If a "run" command was specified:
-    ## - Get the accounts credentials,
-    ## - obtain a short-lived set of credentials through AWS STS,
-    ## - expose those to the sub-process only,
-    ## - run the command
-    if [ "${RUN}" ]; then
-      local AK=$(__getProp ${ACCOUNT} access_key)
-      local SK=$(__getProp ${ACCOUNT} secret_access_key)
+    export AWS_PROFILE=${PROFILE}
+    export AWS_DEFAULT_PROFILE=${PROFILE}
+    export AWS_ACCOUNT_ID=$(__getProp ${ACCOUNT} account)
+    export AWS_REGION=$(__getProp ${ACCOUNT} region)
+    export AWS_ACCESS_KEY_ID=$(__getProp ${ACCOUNT} access_key)
+    export AWS_SECRET_ACCESS_KEY=$(__getProp ${ACCOUNT} secret_access_key)
+    export DOMAIN=$(__getProp ${ACCOUNT} domain)
+    export ENVIRONMENT=$(__getProp ${ACCOUNT} environment)
+    export TERRAFORM_BUCKET=$(__getProp ${ACCOUNT} terraform_bucket)
+
+    echo "\n ✔ Now using profile \"${PROFILE}\""
+
+    ## If we are in a Terraform directory, automatically initialize with the current environment.
+    if [ -f "./main.tf" ]; then
+        echo "   Initializing the current Terraform environment: \"${ENVIRONMENT}\""
+        kee tf
+    fi
+  elif [ "${COMMAND}" = "run" ]; then
+    if [ ! "${PROFILE}" ] && [ ! "${AWS_PROFILE}" ]; then
+      echo "\n 💥 No profile is currently selected."
+    else
+      [ ! "${PROFILE}" ] && PROFILE=${AWS_PROFILE}
+      ACCOUNT=$(__loadAccount ${PROFILE})
+      [ ! "${ACCOUNT}" ] && echo "\n 💥 This profile does not exist." && return
+
       RUN=($(echo ${RUN} | tr " " "\n"))
 
-      ## Generate a temporary set of credentials to perform this action
-      if [ "${TEMP}" = true ]; then
-        local TC=$(AWS_ACCESS_KEY_ID=${AK} AWS_SECRET_ACCESS_KEY=${SK} aws sts get-session-token --duration-seconds 900 --output json | jq -r '.Credentials')
-        TC=(${$(echo ${TC} | jq -r '.AccessKeyId, .SecretAccessKey, .SessionToken')//$'\n'/ })
-        TC=($(echo ${TC} | tr " " "\n"))
-        (AWS_ACCESS_KEY_ID=${TC[1]} AWS_SECRET_ACCESS_KEY=${TC[2]} AWS_SESSION_TOKEN=${TC[3]} "${RUN[@]}")
-      else
+      ## If a "run" command was specified:
+      ## - obtain a short-lived set of credentials through AWS STS,
+      ## - expose the credentials to the sub-process only,
+      ## - run the command
+      local ACCOUNT_TYPE=$(__getProp ${ACCOUNT} type)
+      if [ "${ACCOUNT_TYPE}" = "sso" ]; then
+        ## Find the session file for the current account
+        local START_URL=$(__getProp ${ACCOUNT} start_url)
+
+        local ACCOUNT_ID=$(__getProp ${ACCOUNT} account)
+        local ROLE_NAME=$(__getProp ${ACCOUNT} role_name)
+        local REGION=$(__getProp ${ACCOUNT} region)
+        local ACCESS_TOKEN=$(cat $(grep -Rl "${START_URL}" "${HOME}"/.aws/sso/cache/*) | jq -r '.accessToken')
+
+        local CREDENTIALS=$(echo $(aws sso get-role-credentials --account-id "${ACCOUNT_ID}" --role-name "${ROLE_NAME}" --access-token "${ACCESS_TOKEN}" --region "${REGION}") | jq -r '.roleCredentials')
+        local AK=$(echo "${CREDENTIALS}" | jq -r '.accessKeyId')
+        local SK=$(echo "${CREDENTIALS}" | jq -r '.secretAccessKey')
+
         (AWS_ACCESS_KEY_ID=${AK} AWS_SECRET_ACCESS_KEY=${SK} "${RUN[@]}")
-      fi
-    else
-      export AWS_PROFILE=${PROFILE}
-      export AWS_DEFAULT_PROFILE=${PROFILE}
-      export AWS_ACCOUNT_ID=$(__getProp ${ACCOUNT} account)
-      export AWS_REGION=$(__getProp ${ACCOUNT} region)
-      export AWS_ACCESS_KEY_ID=$(__getProp ${ACCOUNT} access_key)
-      export AWS_SECRET_ACCESS_KEY=$(__getProp ${ACCOUNT} secret_access_key)
-      export DOMAIN=$(__getProp ${ACCOUNT} domain)
-      export ENVIRONMENT=$(__getProp ${ACCOUNT} environment)
-      export TERRAFORM_BUCKET=$(__getProp ${ACCOUNT} terraform_bucket)
+      else
+        local AK=$(__getProp ${ACCOUNT} access_key)
+        local SK=$(__getProp ${ACCOUNT} secret_access_key)
 
-      echo "\n ✔ Now using profile \"${PROFILE}\""
-
-      ## If we are in a Terraform directory, automatically initialize with the current environment.
-      if [ -f "./main.tf" ]; then
-          echo "   Initializing the current Terraform environment: \"${ENVIRONMENT}\""
-          kee tf
+        ## Generate a temporary set of credentials to perform this action
+        if [ "${TEMP}" = true ]; then
+          local TC=$(AWS_ACCESS_KEY_ID=${AK} AWS_SECRET_ACCESS_KEY=${SK} aws sts get-session-token --duration-seconds 900 --output json | jq -r '.Credentials')
+          TC=(${$(echo ${TC} | jq -r '.AccessKeyId, .SecretAccessKey, .SessionToken')//$'\n'/ })
+          TC=($(echo ${TC} | tr " " "\n"))
+          (AWS_ACCESS_KEY_ID=${TC[1]} AWS_SECRET_ACCESS_KEY=${TC[2]} AWS_SESSION_TOKEN=${TC[3]} "${RUN[@]}")
+        else
+          (AWS_ACCESS_KEY_ID=${AK} AWS_SECRET_ACCESS_KEY=${SK} "${RUN[@]}")
+        fi
       fi
+
     fi
+
   elif [ "${COMMAND}" = "login" ]; then
     ACCOUNT=$(__loadAccount ${PROFILE})
     [ ! "${ACCOUNT}" ] && echo "\n 💥 This profile does not exist." && return
     local ACCOUNT_TYPE=$(__getProp ${ACCOUNT} type)
     [ ! "${ACCOUNT_TYPE}" = "sso" ] && echo "\n 💥 This is not an SSO account, can't login." && return
 
-    aws sso login --profile ${PROFILE}
+    aws sso login --profile ${PROFILE} &&
+    aws sts get-caller-identity > /dev/null &&
 
     export AWS_PROFILE=${PROFILE}
     export AWS_DEFAULT_PROFILE=${PROFILE}
