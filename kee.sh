@@ -99,6 +99,11 @@ function kee () {
         echo " • $(__bold Role name:) \t$(__getProp ${ACCOUNT} role_name)"
         echo " • $(__bold Start url:) \t$(__getProp ${ACCOUNT} start_url)"
       fi
+
+      local TERRAFORM_BUCKET=$(__getProp ${ACCOUNT} terraform_bucket)
+      if [ "${TERRAFORM_BUCKET}" ]; then
+        echo " • $(__bold Terraform:) \t${TERRAFORM_BUCKET} (State storage)"
+      fi
     fi
 
     return

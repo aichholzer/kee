@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-KEE=.kees
+KEE=.kee
 KEE_DIR=${HOME}/${KEE}
 [ -d "${KEE_DIR}" ] && echo " 💥 You seem to have 'kee' installed already." && exit
 
