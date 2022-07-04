@@ -258,10 +258,8 @@ function kee () {
     ACTION=${PROFILE}
     [ ! "${ACTION}" ] && ACTION=init
 
-    ACTIONS=("validate plan apply destroy refresh console")
-    if [[ " ${ACTIONS[*]} " =~ " ${ACTION} " ]]; then
-      terraform ${ACTION} ${TF_AUTO_APPROVE} -var-file=${ENVIRONMENT}.tfvars
-    elif [ "${ACTION}" = "init" ]; then
+    # ACTIONS=("validate plan apply destroy refresh console graph")
+    if [ "${ACTION}" = "init" ]; then
       echo
       READ_BUCKET_NAME=false
       if [ -z "${TERRAFORM_BUCKET}" ]; then
@@ -284,6 +282,8 @@ function kee () {
       else
         terraform init
       fi
+    else
+      terraform ${ACTION} ${TF_AUTO_APPROVE} -var-file=${ENVIRONMENT}.tfvars
     fi
   elif [ "${RUN}" ]; then
     PROFILE=${AWS_PROFILE}
