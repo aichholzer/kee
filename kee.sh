@@ -90,7 +90,7 @@ function kee () {
       echo " • $(__bold Environment:) $(__getProp ${ACCOUNT} environment)"
 
       local DOMAIN=$(__getProp ${ACCOUNT} domain)
-      [ "${DOMAIN}" ] && echo " • $(__bold Domain:) \t\t${DOMAIN}"
+      [ "${DOMAIN}" ] && echo " • $(__bold Domain:) \t${DOMAIN}"
 
       if [ ! "${ACCOUNT_TYPE}" = "sso" ]; then
         echo " • $(__bold Access key:) \t$(__getProp ${ACCOUNT} access_key mask 15)"
@@ -217,23 +217,29 @@ function kee () {
         kee tf
     fi
   elif [ "${COMMAND}" = "login" ]; then
-    ACCOUNT=$(__loadAccount ${PROFILE})
-    [ ! "${ACCOUNT}" ] && echo "\n 💥 This profile does not exist." && return
-    local ACCOUNT_TYPE=$(__getProp ${ACCOUNT} type)
-    [ ! "${ACCOUNT_TYPE}" = "sso" ] && echo "\n 💥 This is not an SSO account, can't login." && return
+    if [ ! "${PROFILE}" ] && [ ! "${AWS_PROFILE}" ]; then
+      echo "\n 💥 No profile is currently selected."
+    else
+      [ ! "${PROFILE}" ] && PROFILE=${AWS_PROFILE}
+      ACCOUNT=$(__loadAccount ${PROFILE})
+      [ ! "${ACCOUNT}" ] && echo "\n 💥 This profile does not exist." && return
 
-    aws sso login --profile ${PROFILE} > /dev/null &&
-    aws sts get-caller-identity > /dev/null &&
+      local ACCOUNT_TYPE=$(__getProp ${ACCOUNT} type)
+      [ ! "${ACCOUNT_TYPE}" = "sso" ] && echo "\n 💥 This is not an SSO account, can't login." && return
 
-    export AWS_PROFILE=${PROFILE}
-    export AWS_DEFAULT_PROFILE=${PROFILE}
-    export AWS_ACCOUNT_ID=$(__getProp ${ACCOUNT} account)
-    export AWS_REGION=$(__getProp ${ACCOUNT} region)
-    export DOMAIN=$(__getProp ${ACCOUNT} domain)
-    export ENVIRONMENT=$(__getProp ${ACCOUNT} environment)
-    export TERRAFORM_BUCKET=$(__getProp ${ACCOUNT} terraform_bucket)
+      aws sso login --profile ${PROFILE} > /dev/null &&
+      aws sts get-caller-identity > /dev/null &&
 
-    echo "\n ✔ Now logged in and using SSO profile \"${PROFILE}\""
+      export AWS_PROFILE=${PROFILE}
+      export AWS_DEFAULT_PROFILE=${PROFILE}
+      export AWS_ACCOUNT_ID=$(__getProp ${ACCOUNT} account)
+      export AWS_REGION=$(__getProp ${ACCOUNT} region)
+      export DOMAIN=$(__getProp ${ACCOUNT} domain)
+      export ENVIRONMENT=$(__getProp ${ACCOUNT} environment)
+      export TERRAFORM_BUCKET=$(__getProp ${ACCOUNT} terraform_bucket)
+
+      echo "\n ✔ You are now logged-in and using the \"${PROFILE}\" SSO profile."
+    fi
   elif [ "${COMMAND}" = "export" ]; then
     local SAFETY_NOTICE="\n ⚠️  You are about to export PLACEHOLDER. Make sure you keep this output safe & secure."
     if [ ! "${PROFILE}" ]; then
