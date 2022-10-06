@@ -258,7 +258,7 @@ function kee () {
     ACTION=${PROFILE}
     [ ! "${ACTION}" ] && ACTION=init
 
-    # ACTIONS=("validate plan apply destroy refresh console graph")
+    # ACTIONS=("validate plan apply destroy refresh console graph fmt")
     if [ "${ACTION}" = "init" ]; then
       echo
       READ_BUCKET_NAME=false
@@ -282,6 +282,8 @@ function kee () {
       else
         terraform init
       fi
+    elif [ "${ACTION}" = "fmt" ]; then
+      terraform fmt -recursive
     else
       terraform ${ACTION} ${TF_AUTO_APPROVE} -var-file=${ENVIRONMENT}.tfvars
     fi
