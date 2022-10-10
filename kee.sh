@@ -35,6 +35,21 @@ function __bold () {
   echo -e "\033[1m${1}\033[0m"
 }
 
+function __clearConfig () {
+  ## Remove the account from the AWS CLI config files.
+  AWS_FILES=($(find ~/.aws/* -type f))
+  for af in "${AWS_FILES[@]}"; do
+    BASE=$(basename $af)
+    EXT=${BASE##*.}
+
+    if [[ ! "${EXT}" = "json" ]]; then
+      sed -i '' '/\[profile '${PROFILE}'\]/,/^$/d' $af
+      sed -i '' '/\['${PROFILE}'\]/,/^$/d' $af
+      sed -i '' 'N;/^\n$/d;P;D' $af
+    fi
+  done
+}
+
 function kee () {
   local COMMAND=${1}
   local PROFILE=${2}
@@ -175,7 +190,7 @@ function kee () {
     [ ! "${ACCOUNT}" ] && echo "\n 💥 This profile does not exist, nothing to remove..." && return
 
     echo "\n ⚠️  This will permanently remove \"${PROFILE}\""
-    read "CONTINUE? Type \"yes\" to continue: "
+    read "CONTINUE?    Type \"yes\" to continue: "
 
     if [ "${CONTINUE}" = "yes" ]; then
       ACCOUNTS=$(echo $(__loadAccounts) | jq -c 'del(.[] | select(.profile == "'${PROFILE}'"))')
@@ -189,9 +204,7 @@ function kee () {
       fi
 
       ## Remove the account from the AWS CLI config files.
-      sed -i '' '/\[profile '${PROFILE}'\]/,/^$/d' ~/.aws/*
-      sed -i '' '/\['${PROFILE}'\]/,/^$/d' ~/.aws/*
-      sed -i '' 'N;/^\n$/d;P;D' ~/.aws/*
+      __clearConfig
 
       kee ls
     fi
@@ -258,7 +271,7 @@ function kee () {
     ACTION=${PROFILE}
     [ ! "${ACTION}" ] && ACTION=init
 
-    # ACTIONS=("validate plan apply destroy refresh console graph fmt")
+    # ACTIONS=("validate plan apply destroy refresh console graph")
     if [ "${ACTION}" = "init" ]; then
       echo
       READ_BUCKET_NAME=false
@@ -282,8 +295,6 @@ function kee () {
       else
         terraform init
       fi
-    elif [ "${ACTION}" = "fmt" ]; then
-      terraform fmt -recursive
     else
       terraform ${ACTION} ${TF_AUTO_APPROVE} -var-file=${ENVIRONMENT}.tfvars
     fi
@@ -304,6 +315,7 @@ function kee () {
 
       ## Find the session file for the current account,
       ## and extract the access token from it.
+      ## https://aws.amazon.com/premiumsupport/knowledge-center/sso-temporary-credentials/
       local ACCESS_TOKEN=$(cat $(grep -Rl "${START_URL}" "${HOME}"/.aws/sso/cache/*) | jq -r '.accessToken')
 
       ## Get the credentials for the SSL role.
@@ -339,10 +351,9 @@ function kee () {
       fi
     fi
 
-    ## Remove the credentials from the AWS CLI config files.
-    sed -i '' '/\[profile '${PROFILE}'\]/,/^$/d' ~/.aws/credentials
-    sed -i '' '/\['${PROFILE}'\]/,/^$/d' ~/.aws/credentials
-    sed -i '' 'N;/^\n$/d;P;D' ~/.aws/credentials
+    ## Remove the account from the AWS CLI config files.
+    __clearConfig
+
   else
     echo "\n 💥 You need to give me a command."
 
