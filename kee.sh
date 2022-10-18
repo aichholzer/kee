@@ -50,6 +50,36 @@ function __clearConfig () {
   done
 }
 
+function __extractFromSession () {
+  local ACCOUNT=$(__loadAccount ${1})
+
+  ## Hack: find the session file for the current account,
+  ## and extract what we need from it.
+  ## https://aws.amazon.com/premiumsupport/knowledge-center/sso-temporary-credentials/
+  local START_URL=$(__getProp ${ACCOUNT} start_url)
+  local SESSION_FILE=$(echo -n "${START_URL}" | shasum | awk '{print $1}')
+  local FILE_PATH="${HOME}/.aws/sso/cache/${SESSION_FILE}.json"
+
+  if [ ! -f ${FILE_PATH} ]; then
+    echo ""
+  else
+    echo $(cat ${FILE_PATH} | jq -r ".${2}")
+  fi
+}
+
+function __isSessionExpired () {
+  local EXPIRATION=$(__extractFromSession ${1} "expiresAt")
+
+  if [ ! ${EXPIRATION} ]; then
+    echo "yes"
+  else
+    local SESSION_TIME=$(date -juf '%Y-%m-%dT%H:%M:%SZ' $EXPIRATION '+%s')
+    local LOCAL_TIME=$(date -juf '%Y-%m-%dT%H:%M:%SZ' $(date -u +'%Y-%m-%dT%H:%M:%SZ') '+%s')
+
+    [ $SESSION_TIME -le $LOCAL_TIME ] && echo "yes" || echo ""
+  fi
+}
+
 function kee () {
   local COMMAND=${1}
   local PROFILE=${2}
@@ -87,7 +117,7 @@ function kee () {
     ## TODO: Add `[sso]` to listed SSO accounts.
     echo ""
     ACCOUNTS=$(echo $(__loadAccounts) | jq -r '.[] | .profile' | sed "s/\w*/ • /")
-    [ ! "${ACCOUNTS}" ] && echo " 💥 No accounts have been found.\n    Get started with: kee add ..." || echo ${ACCOUNTS}
+    [ ! "${ACCOUNTS}" ] && echo " ✗ No accounts have been found.\n    Get started with: kee add ..." || echo ${ACCOUNTS}
   elif [ "${COMMAND}" = "show" ]; then
     if [ ! "${PROFILE}" ] && [ ! "${AWS_PROFILE}" ]; then
       echo "\n 💥 No profile is currently selected."
@@ -209,8 +239,8 @@ function kee () {
       kee ls
     fi
   elif [ "${COMMAND}" = "use" ]; then
-    ACCOUNT=$(__loadAccount ${PROFILE})
-    [ ! "${ACCOUNT}" ] && echo "\n 💥 This profile does not exist." && return
+    AWS_PROFILE=$(__loadAccount ${PROFILE})
+    [ ! "${ACCOUNT}" ] && echo "\n ✗ This profile does not exist." && return
 
     export AWS_PROFILE=${PROFILE}
     export AWS_DEFAULT_PROFILE=${PROFILE}
@@ -223,12 +253,13 @@ function kee () {
     export TERRAFORM_BUCKET=$(__getProp ${ACCOUNT} terraform_bucket)
 
     echo "\n ✔ Now using profile \"${PROFILE}\""
+    [[ -n $(__isSessionExpired ${PROFILE}) ]] && echo " ✗ This profile's session has expired. Logging you in..." && kee login
 
     ## If we are in a Terraform directory, automatically initialize with the current environment.
-    if [ -f "./main.tf" ]; then
-        echo "   Initializing the current Terraform environment: \"${ENVIRONMENT}\""
-        kee tf
-    fi
+    #if [ -f "./main.tf" ]; then
+    #  echo "   Initializing the current Terraform environment: \"${ENVIRONMENT}\""
+    #  kee tf
+    #fi
   elif [ "${COMMAND}" = "login" ]; then
     if [ ! "${PROFILE}" ] && [ ! "${AWS_PROFILE}" ]; then
       echo "\n 💥 No profile is currently selected."
@@ -266,7 +297,15 @@ function kee () {
     [ ! "${EXPORT_FILE}" ] && EXPORT_FILE="kee.json"
     [ ! "${PROFILE}" ] && __loadAccounts '[]' | jq -r '.' > ${EXPORT_FILE} || __loadAccount ${PROFILE} > ${EXPORT_FILE}
   elif [ "${COMMAND}" = "tf" ]; then
-    [ ! "${ENVIRONMENT}" ] && echo "\n 💥 The ENVIRONMENT must be set before running this action." && return
+    [ ! "${ENVIRONMENT}" ] && echo "\n ✗ The ENVIRONMENT must be set before running this action." && return
+
+    local ACCOUNT=$(__loadAccount ${AWS_PROFILE})
+    [ ! "${ACCOUNT}" ] && echo "\n ✗ A profile must be selected before running this command." && return
+    local ACCOUNT_TYPE=$(__getProp ${ACCOUNT} type)
+    if [[ "${ACCOUNT_TYPE}" = "sso" ]] && [[ -n $(__isSessionExpired ${AWS_PROFILE}) ]]; then
+       echo " ✗ This profile's session has expired. Logging you in..."
+       kee login
+    fi
 
     ACTION=${PROFILE}
     [ ! "${ACTION}" ] && ACTION=init
@@ -301,7 +340,7 @@ function kee () {
   elif [ "${RUN}" ]; then
     PROFILE=${AWS_PROFILE}
     ACCOUNT=$(__loadAccount ${PROFILE})
-    [ ! "${ACCOUNT}" ] && echo "\n 💥 This profile does not exist." && return
+    [ ! "${ACCOUNT}" ] && echo "\n ✗ This profile does not exist." && return
 
     RUN=($(echo ${RUN} | tr " " "\n"))
 
@@ -312,11 +351,9 @@ function kee () {
       local ACCOUNT_ID=$(__getProp ${ACCOUNT} account)
       local ROLE_NAME=$(__getProp ${ACCOUNT} role_name)
       local REGION=$(__getProp ${ACCOUNT} region)
+      local ACCESS_TOKEN=$(__extractFromSession ${PROFILE} "accessToken")
 
-      ## Find the session file for the current account,
-      ## and extract the access token from it.
-      ## https://aws.amazon.com/premiumsupport/knowledge-center/sso-temporary-credentials/
-      local ACCESS_TOKEN=$(cat $(grep -Rl "${START_URL}" "${HOME}"/.aws/sso/cache/*) | jq -r '.accessToken')
+      [ $(__isSessionExpired ${PROFILE}) ] && echo "\n ✗ Your session has expired." && return
 
       ## Get the credentials for the SSL role.
       TC=$(echo $(aws sso get-role-credentials --account-id "${ACCOUNT_ID}" --role-name "${ROLE_NAME}" --access-token "${ACCESS_TOKEN}" --region "${REGION}") | jq -r '.roleCredentials')
@@ -355,7 +392,7 @@ function kee () {
     __clearConfig
 
   else
-    echo "\n 💥 You need to give me a command."
+    echo "\n ✗ You need to give me a command."
 
     echo "\n Currently active profile:"
     kee show
