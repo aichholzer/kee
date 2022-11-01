@@ -117,7 +117,7 @@ function kee () {
     ## TODO: Add `[sso]` to listed SSO accounts.
     echo ""
     ACCOUNTS=$(echo $(__loadAccounts) | jq -r '.[] | .profile' | sed "s/\w*/ • /")
-    [ ! "${ACCOUNTS}" ] && echo " ✗ No accounts have been found.\n    Get started with: kee add ..." || echo ${ACCOUNTS}
+    [ ! "${ACCOUNTS}" ] && echo " ✗ No accounts have been found.\n   Get started with: kee add ..." || echo ${ACCOUNTS}
   elif [ "${COMMAND}" = "show" ]; then
     if [ ! "${PROFILE}" ] && [ ! "${AWS_PROFILE}" ]; then
       echo "\n 💥 No profile is currently selected."
@@ -239,7 +239,7 @@ function kee () {
       kee ls
     fi
   elif [ "${COMMAND}" = "use" ]; then
-    AWS_PROFILE=$(__loadAccount ${PROFILE})
+    ACCOUNT=$(__loadAccount ${PROFILE})
     [ ! "${ACCOUNT}" ] && echo "\n ✗ This profile does not exist." && return
 
     export AWS_PROFILE=${PROFILE}
