@@ -37,7 +37,12 @@ function __bold () {
 
 function __clearConfig () {
   ## Remove the account from the AWS CLI config files.
-  AWS_FILES=($(find ~/.aws/* -type f))
+  if [ "${1}" = "credentials" ]; then
+    local AWS_FILES=($(find ~/.aws/credentials -type f))
+  else
+    local AWS_FILES=($(find ~/.aws/* -type f))
+  fi
+
   for af in "${AWS_FILES[@]}"; do
     BASE=$(basename $af)
     EXT=${BASE##*.}
@@ -388,8 +393,8 @@ function kee () {
       fi
     fi
 
-    ## Remove the account from the AWS CLI config files.
-    __clearConfig
+    ## Remove only the temporary credentials (as writen above)
+    __clearConfig "credentials"
 
   else
     echo "\n ✗ You need to give me a command."
