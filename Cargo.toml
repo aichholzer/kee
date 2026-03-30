@@ -8,6 +8,15 @@ license = "MIT"
 repository = "https://github.com/aichholzer/kee"
 keywords = ["aws", "cli", "sso", "session", "manager"]
 categories = ["command-line-utilities", "development-tools"]
+exclude = [
+    ".github/",
+    "completions/",
+    "scripts/",
+    "utilities/",
+    "tests/",
+    "install.sh",
+    "Makefile",
+]
 
 [[bin]]
 name = "kee"

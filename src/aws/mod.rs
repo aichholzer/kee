@@ -188,8 +188,8 @@ impl AwsManager {
         let response: CreateTokenResponse = serde_json::from_slice(&output.stdout).ok()?;
 
         // Build the updated cache and write it back
-        let expires_at = Utc::now()
-            + chrono::Duration::seconds(response.expires_in.unwrap_or(28800) as i64);
+        let expires_at =
+            Utc::now() + chrono::Duration::seconds(response.expires_in.unwrap_or(28800) as i64);
 
         let updated = SsoTokenCache {
             access_token: Some(response.access_token),

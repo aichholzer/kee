@@ -43,13 +43,19 @@ A simple tool to help you manage multiple AWS profiles, with SSO support and eas
 - AWS CLI v2 installed and configured
 - Configured AWS SSO account access
 
-### Clone this repository:
+### Install from crates.io
+
+```bash
+cargo install kee
+```
+
+### Install from source
+
+Clone this repository:
 
 ```bash
 git clone https://github.com/keecli/kee.rs.git ~/.kee
 ```
-
-### Build and install
 
 **Option 1: Automated (recommended)**
 
@@ -59,6 +65,7 @@ cd ~/.kee
 ```
 
 > This script will build an optimized `Kee` binary, install it (in `~/.cargo/bin`), and add the folder to your `PATH`.
+> It will also install Kee's auto completions.
 
 **Option 2: Manual**
 

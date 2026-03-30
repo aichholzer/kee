@@ -105,7 +105,11 @@ impl Spinner {
         let handle = thread::spawn(move || {
             let mut i = 0;
             while running_clone.load(Ordering::Relaxed) {
-                print!("\r {} {}", SPINNER_FRAMES[i % SPINNER_FRAMES.len()], message);
+                print!(
+                    "\r {} {}",
+                    SPINNER_FRAMES[i % SPINNER_FRAMES.len()],
+                    message
+                );
                 let _ = io::stdout().flush();
                 thread::sleep(Duration::from_millis(80));
                 i += 1;
