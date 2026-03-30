@@ -392,29 +392,24 @@ impl KeeManager {
         let profile_info = config.profiles.get(profile_name).unwrap();
         let profile_name = &profile_info.profile_name;
 
-        // Check credentials
+        // Always attempt a token refresh to maximise session duration
         println!();
-        let spinner = Spinner::start("Validating session...");
-        let credentials_valid = self.check_credentials(profile_name);
-        if credentials_valid {
+        let spinner = Spinner::start("Refreshing session...");
+        let refreshed = self.aws_manager.try_refresh_token(profile_info)
+            && self.check_credentials(profile_name);
+
+        if refreshed {
+            spinner.stop(" [✓] Session refreshed.");
+        } else if self.check_credentials(profile_name) {
             spinner.stop(" [✓] Session is valid.");
         } else {
-            spinner.stop(" [!] Your session has expired. Refreshing...");
-
-            let spinner = Spinner::start("Refreshing token...");
-            if self.aws_manager.try_refresh_token(profile_info)
-                && self.check_credentials(profile_name)
-            {
-                spinner.stop(" [✓] Session refreshed.");
-            } else {
-                spinner.stop(" [!] Could not refresh the session. Opening SSO login...");
-                if !self.sso_login(profile_name)? {
-                    println!(
-                        " [X] Failed to authenticate. Please run {} manually.",
-                        hlt("aws sso login")
-                    );
-                    return Ok(false);
-                }
+            spinner.stop(" [!] Session expired. Opening SSO login...");
+            if !self.sso_login(profile_name)? {
+                println!(
+                    " [X] Failed to authenticate. Please run {} manually.",
+                    hlt("aws sso login")
+                );
+                return Ok(false);
             }
         }
 
