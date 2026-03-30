@@ -5,17 +5,6 @@ use std::collections::HashMap;
 mod aws;
 pub use aws::ProfileInfo;
 
-pub const KEE_ART: &str = r#"
-
-    ██╗  ██╗███████╗███████╗
-    ██║ ██╔╝██╔════╝██╔════╝
-    █████╔╝ █████╗  █████╗
-    ██╔═██╗ ██╔══╝  ██╔══╝
-    ██║  ██╗███████╗███████╗
-    ╚═╝  ╚═╝╚══════╝╚══════╝
-
-    AWS CLI profile manager"#;
-
 #[derive(Serialize, Deserialize, Debug, PartialEq, Default)]
 pub struct KeeConfig {
     pub profiles: HashMap<String, ProfileInfo>,
@@ -56,53 +45,9 @@ impl KeeConfig {
     }
 }
 
-pub fn format_profile_name(profile_name: &str) -> String {
-    format!("kee-{profile_name}")
-}
-
-pub fn parse_aws_config_section(
-    content: &str,
-    section_name: &str,
-) -> Option<HashMap<String, String>> {
-    let mut in_section = false;
-    let mut section_data = HashMap::new();
-    let target_section = format!("[{section_name}]");
-
-    for line in content.lines() {
-        let line = line.trim();
-
-        if line.starts_with('[') {
-            in_section = line == target_section;
-            continue;
-        }
-
-        if in_section && !line.is_empty() && line.contains('=') {
-            let parts: Vec<&str> = line.splitn(2, '=').collect();
-            if parts.len() == 2 {
-                let key = parts[0].trim().to_string();
-                let value = parts[1].trim().to_string();
-                section_data.insert(key, value);
-            }
-        }
-    }
-
-    if section_data.is_empty() {
-        None
-    } else {
-        Some(section_data)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_kee_art_contains_expected_content() {
-        assert!(KEE_ART.contains("AWS CLI profile manager"));
-        assert!(!KEE_ART.is_empty());
-        assert!(KEE_ART.len() > 50); // Should be a substantial ASCII art
-    }
 
     #[test]
     fn test_profile_info_serialization() {
@@ -263,92 +208,5 @@ mod tests {
         let deserialized: KeeConfig = serde_json::from_str(&json).unwrap();
 
         assert_eq!(config, deserialized);
-    }
-
-    #[test]
-    fn test_format_profile_name() {
-        assert_eq!(format_profile_name("test"), "kee-test");
-        assert_eq!(format_profile_name("my-profile"), "kee-my-profile");
-        assert_eq!(format_profile_name(""), "kee-");
-    }
-
-    #[test]
-    fn test_parse_aws_config_section_valid() {
-        let config_content = r#"
-[profile kee-test]
-sso_start_url = https://test.awsapps.com/start
-sso_region = us-east-1
-sso_account_id = 123456789012
-sso_role_name = TestRole
-
-[profile other-profile]
-"#;
-
-        let section = parse_aws_config_section(config_content, "profile kee-test").unwrap();
-
-        assert_eq!(
-            section.get("sso_start_url"),
-            Some(&"https://test.awsapps.com/start".to_string())
-        );
-        assert_eq!(section.get("sso_region"), Some(&"us-east-1".to_string()));
-        assert_eq!(
-            section.get("sso_account_id"),
-            Some(&"123456789012".to_string())
-        );
-        assert_eq!(section.get("sso_role_name"), Some(&"TestRole".to_string()));
-    }
-
-    #[test]
-    fn test_parse_aws_config_section_nonexistent() {
-        let config_content = r#"
-[profile kee-test]
-sso_start_url = https://test.awsapps.com/start
-"#;
-
-        let section = parse_aws_config_section(config_content, "profile nonexistent");
-        assert!(section.is_none());
-    }
-
-    #[test]
-    fn test_parse_aws_config_section_empty_content() {
-        let section = parse_aws_config_section("", "profile test");
-        assert!(section.is_none());
-    }
-
-    #[test]
-    fn test_parse_aws_config_section_malformed() {
-        let config_content = r#"
-[profile kee-test]
-invalid_line_without_equals
-sso_start_url = https://test.awsapps.com/start
-= value_without_key
-key_without_value =
-"#;
-
-        let section = parse_aws_config_section(config_content, "profile kee-test").unwrap();
-
-        // Should parse valid lines and ignore malformed ones
-        assert_eq!(
-            section.get("sso_start_url"),
-            Some(&"https://test.awsapps.com/start".to_string())
-        );
-        assert_eq!(section.get("key_without_value"), Some(&"".to_string()));
-        assert!(!section.contains_key("invalid_line_without_equals"));
-    }
-
-    #[test]
-    fn test_parse_aws_config_section_with_spaces() {
-        let config_content = r#"
-[profile kee-test]
-  sso_start_url   =   https://test.awsapps.com/start
-  region=us-east-1
-"#;
-
-        let section = parse_aws_config_section(config_content, "profile kee-test").unwrap();
-
-        assert_eq!(
-            section.get("sso_start_url"),
-            Some(&"https://test.awsapps.com/start".to_string())
-        );
     }
 }

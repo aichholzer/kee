@@ -1,11 +1,11 @@
-#![allow(dead_code)]
-
+use chrono::Utc;
 use configparser::ini::Ini;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
+use std::process::Command;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ProfileInfo {
@@ -17,10 +17,13 @@ pub struct ProfileInfo {
     pub session_name: String,
 }
 
+#[allow(dead_code)]
 pub struct AwsManager {
     aws_config_file: PathBuf,
+    sso_cache_dir: PathBuf,
 }
 
+#[allow(dead_code)]
 impl AwsManager {
     pub fn new() -> io::Result<Self> {
         let home_dir = dirs::home_dir().ok_or_else(|| {
@@ -31,8 +34,12 @@ impl AwsManager {
         })?;
 
         let aws_config_file = home_dir.join(".aws").join("config");
+        let sso_cache_dir = home_dir.join(".aws").join("sso").join("cache");
 
-        Ok(Self { aws_config_file })
+        Ok(Self {
+            aws_config_file,
+            sso_cache_dir,
+        })
     }
 
     pub fn load_config(&self) -> io::Result<Ini> {
@@ -132,4 +139,142 @@ impl AwsManager {
             session_name,
         })
     }
+
+    /// Attempt to refresh an expired SSO access token using the cached refresh token.
+    /// Returns true if the token was successfully refreshed, false otherwise.
+    pub fn try_refresh_token(&self, profile_info: &ProfileInfo) -> bool {
+        self.do_refresh_token(profile_info).is_some()
+    }
+
+    fn do_refresh_token(&self, profile_info: &ProfileInfo) -> Option<()> {
+        let cache_file = self.find_sso_cache_file(profile_info)?;
+        let content = fs::read_to_string(&cache_file).ok()?;
+        let cache: SsoTokenCache = serde_json::from_str(&content).ok()?;
+
+        let refresh_token = cache.refresh_token.as_ref().filter(|t| !t.is_empty())?;
+        let client_id = cache.client_id.as_ref().filter(|id| !id.is_empty())?;
+        let client_secret = cache.client_secret.as_ref().filter(|s| !s.is_empty())?;
+
+        // Check that the client registration itself hasn't expired
+        if let Some(ref reg_expires) = cache.registration_expires_at {
+            let expires = reg_expires.parse::<chrono::DateTime<Utc>>().ok()?;
+            if Utc::now() >= expires {
+                return None;
+            }
+        }
+
+        // Call sso-oidc create-token with the refresh token
+        let output = Command::new("aws")
+            .args([
+                "sso-oidc",
+                "create-token",
+                "--client-id",
+                client_id,
+                "--client-secret",
+                client_secret,
+                "--grant-type",
+                "refresh_token",
+                "--refresh-token",
+                refresh_token,
+                "--region",
+                &profile_info.sso_region,
+            ])
+            .env("AWS_CLI_AUTO_PROMPT", "off")
+            .env("AWS_PAGER", "")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())?;
+
+        let response: CreateTokenResponse = serde_json::from_slice(&output.stdout).ok()?;
+
+        // Build the updated cache and write it back
+        let expires_at = Utc::now()
+            + chrono::Duration::seconds(response.expires_in.unwrap_or(28800) as i64);
+
+        let updated = SsoTokenCache {
+            access_token: Some(response.access_token),
+            expires_at: Some(expires_at.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
+            refresh_token: response.refresh_token.or(cache.refresh_token),
+            client_id: cache.client_id,
+            client_secret: cache.client_secret,
+            registration_expires_at: cache.registration_expires_at,
+            start_url: cache.start_url,
+            region: cache.region,
+        };
+
+        let json = serde_json::to_string_pretty(&updated).ok()?;
+        fs::write(&cache_file, json).ok()?;
+
+        Some(())
+    }
+
+    /// Find the SSO cache file for a given profile by matching the start URL or session name.
+    fn find_sso_cache_file(&self, profile_info: &ProfileInfo) -> Option<PathBuf> {
+        if !self.sso_cache_dir.exists() {
+            return None;
+        }
+
+        let entries = fs::read_dir(&self.sso_cache_dir).ok()?;
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+
+            let content = match fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            let cache: SsoTokenCache = match serde_json::from_str(&content) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            // Match by start URL — this is how the AWS CLI identifies cache entries
+            if let Some(ref url) = cache.start_url {
+                if url == &profile_info.sso_start_url {
+                    return Some(path);
+                }
+            }
+        }
+
+        None
+    }
+}
+
+/// Represents the cached SSO token file in ~/.aws/sso/cache/
+#[allow(dead_code)]
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct SsoTokenCache {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registration_expires_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
+}
+
+/// Response from `aws sso-oidc create-token`
+#[allow(dead_code)]
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct CreateTokenResponse {
+    pub access_token: String,
+    #[serde(default)]
+    pub expires_in: Option<i64>,
+    #[serde(default)]
+    pub refresh_token: Option<String>,
 }

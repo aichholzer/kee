@@ -38,7 +38,7 @@ mod integration_tests {
         assert!(output.status.success());
         let stdout = String::from_utf8(output.stdout).unwrap();
         assert!(stdout.contains("kee"));
-        assert!(stdout.contains("1.0.0")); // Should match version in Cargo.toml
+        assert!(stdout.contains(env!("CARGO_PKG_VERSION")));
     }
 
     #[test]
@@ -68,7 +68,8 @@ mod integration_tests {
 
         assert!(output.status.success());
         let stdout = String::from_utf8(output.stdout).unwrap();
-        assert!(stdout.contains("No profiles configured"));
+        // With --names on empty config, output should be clean (no help text)
+        assert!(stdout.trim().is_empty());
     }
 
     #[test]

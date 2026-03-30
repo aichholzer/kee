@@ -41,7 +41,7 @@ A simple tool to help you manage multiple AWS profiles, with SSO support and eas
 
 - Rust 1.80+ (install from [rustup.rs](https://rustup.rs/)) (On Mac with brew: `brew install rust`)
 - AWS CLI v2 installed and configured
-- Access to AWS SSO
+- Configured AWS SSO account access
 
 ### Clone this repository:
 
@@ -189,7 +189,16 @@ When you use a profile, `Kee`:
 
 ### Session management
 
-`Kee` prevents you from starting a sub-shell while already in one:
+When you run `kee use`, your session is validated automatically. If your SSO access token has expired, `Kee` will attempt a silent refresh using the cached refresh token — no browser required. If the refresh token is also expired or unavailable, it falls back to the full `aws sso login` flow.
+
+```
+ ⠹ Validating session...
+ [!] Your session has expired. Refreshing...
+ ⠼ Refreshing token...
+ [✓] Session refreshed.
+```
+
+`Kee` also prevents you from starting a sub-shell while already in one:
 
 ```bash
 aws:mycompany.dev $ kee use mycompany.prod
@@ -337,6 +346,24 @@ aws sso login --profile PROFILE_NAME
 cd ~/.kee
 ./utilities/githooks.sh
 ```
+
+### Versioning
+
+We use [semantic versioning](https://semver.org/). Version bumps are handled with [`cargo-release`](https://github.com/crate-ci/cargo-release).
+
+```bash
+cargo install cargo-release
+```
+
+When your changes are ready:
+
+```bash
+cargo release patch   # Bug fixes:        1.1.0 → 1.1.1
+cargo release minor   # New features:     1.1.0 → 1.2.0
+cargo release major   # Breaking changes: 1.0.0 → 2.0.0
+```
+
+This updates `Cargo.toml`, commits, and tags in one step. Add `--execute` to apply (without it, it runs in dry-run mode).
 
 ## License
 

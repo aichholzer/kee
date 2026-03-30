@@ -161,23 +161,6 @@ mod utility_tests {
     use super::*;
 
     #[test]
-    fn test_environment_variable_constants() {
-        // Test that our constants are properly defined
-        let kee_vars = vec![
-            "KEE_ACTIVE_PROFILE",
-            "KEE_CURRENT_PROFILE",
-            "AWS_PROFILE",
-            "AWS_CLI_AUTO_PROMPT",
-            "AWS_PAGER",
-        ];
-
-        for var in kee_vars {
-            assert!(!var.is_empty());
-            assert!(var.len() > 3);
-        }
-    }
-
-    #[test]
     fn test_profile_info_clone() {
         let profile = ProfileInfo {
             profile_name: "test".to_string(),

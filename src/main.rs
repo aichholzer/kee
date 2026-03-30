@@ -6,6 +6,10 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 mod aws;
 use aws::{AwsManager, ProfileInfo};
@@ -33,8 +37,8 @@ const AWS_PAGER: &str = "AWS_PAGER";
 #[derive(Parser)]
 #[command(name = "kee")]
 #[command(version = env!("CARGO_PKG_VERSION"))]
-#[command(about = KEE_ART)]
-#[command(long_about = format!("{KEE_ART}\n\nExamples:\n  kee add myprofile          Add a new AWS profile\n  kee use myprofile          Use an available profile (starts sub-shell)\n  kee ls                     List all available profiles\n  kee current                Show current, active profile\n  kee rm myprofile           Remove a profile configuration"))]
+#[command(about = format!("{KEE_ART}\n V. {}", env!("CARGO_PKG_VERSION")))]
+#[command(long_about = format!("{KEE_ART}\n V. {}\n\nExamples:\n  kee add myprofile          Add a new AWS profile\n  kee use myprofile          Use an available profile (starts sub-shell)\n  kee ls                     List all available profiles\n  kee current                Show current, active profile\n  kee rm myprofile           Remove a profile configuration", env!("CARGO_PKG_VERSION")))]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -83,6 +87,58 @@ struct KeeManager {
 
 fn hlt(text: &str) -> String {
     format!("{BOLD_WHITE}{text}{RESET}")
+}
+
+const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+struct Spinner {
+    running: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl Spinner {
+    fn start(message: &str) -> Self {
+        let running = Arc::new(AtomicBool::new(true));
+        let running_clone = Arc::clone(&running);
+        let message = message.to_string();
+
+        let handle = thread::spawn(move || {
+            let mut i = 0;
+            while running_clone.load(Ordering::Relaxed) {
+                print!("\r {} {}", SPINNER_FRAMES[i % SPINNER_FRAMES.len()], message);
+                let _ = io::stdout().flush();
+                thread::sleep(Duration::from_millis(80));
+                i += 1;
+            }
+        });
+
+        Self {
+            running,
+            handle: Some(handle),
+        }
+    }
+
+    fn stop(mut self, result: &str) {
+        self.running.store(false, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+        // Clear the spinner line and print the result
+        print!("\r\x1b[2K");
+        let _ = io::stdout().flush();
+        println!("{result}");
+    }
+}
+
+impl Drop for Spinner {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+        print!("\r\x1b[2K");
+        let _ = io::stdout().flush();
+    }
 }
 
 impl KeeManager {
@@ -148,10 +204,6 @@ impl KeeManager {
             hlt("6.")
         );
         println!(
-            "  {} Choose your output format (recommend: json)",
-            hlt("7.")
-        );
-        println!(
             "\n  {} A session can be liked to multiple profiles.\n  When prompted for a 'session name', use something generic, like your company name.\n",
             hlt("Tip:")
         );
@@ -206,10 +258,12 @@ impl KeeManager {
         let config = self.load_config();
 
         if config.profiles.is_empty() {
-            println!(
-                "\n [!] No profiles configured.\n Run {} to add one.",
-                hlt("kee add PROFILE_NAME")
-            );
+            if !names {
+                println!(
+                    "\n [!] No profiles configured.\n Run {} to add one.",
+                    hlt("kee add PROFILE_NAME")
+                );
+            }
             return;
         }
 
@@ -251,10 +305,7 @@ impl KeeManager {
         }
 
         // Get profile info before removal
-        let profile_info = config.profiles.get(profile_name).unwrap().clone();
-
-        // Remove from config
-        config.profiles.remove(profile_name);
+        let profile_info = config.profiles.remove(profile_name).unwrap();
 
         // Clear current profile if it's the one being removed
         if config.current_profile.as_deref() == Some(profile_name) {
@@ -342,14 +393,28 @@ impl KeeManager {
         let profile_name = &profile_info.profile_name;
 
         // Check credentials
-        if !self.check_credentials(profile_name) {
-            println!("\n [!] Credentials expired or not available. Attempting SSO login...");
-            if !self.sso_login(profile_name)? {
-                println!(
-                    " [X] Failed to authenticate. Please run {} manually.",
-                    hlt("aws sso login")
-                );
-                return Ok(false);
+        println!();
+        let spinner = Spinner::start("Validating session...");
+        let credentials_valid = self.check_credentials(profile_name);
+        if credentials_valid {
+            spinner.stop(" [✓] Session is valid.");
+        } else {
+            spinner.stop(" [!] Your session has expired. Refreshing...");
+
+            let spinner = Spinner::start("Refreshing token...");
+            if self.aws_manager.try_refresh_token(profile_info)
+                && self.check_credentials(profile_name)
+            {
+                spinner.stop(" [✓] Session refreshed.");
+            } else {
+                spinner.stop(" [!] Could not refresh the session. Opening SSO login...");
+                if !self.sso_login(profile_name)? {
+                    println!(
+                        " [X] Failed to authenticate. Please run {} manually.",
+                        hlt("aws sso login")
+                    );
+                    return Ok(false);
+                }
             }
         }
 
@@ -386,9 +451,11 @@ impl KeeManager {
             .args(["sts", "get-caller-identity", "--profile", profile_name])
             .env(AWS_CLI_AUTO_PROMPT, "off")
             .env(AWS_PAGER, "")
-            .output()
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
         {
-            Ok(output) => output.status.success(),
+            Ok(status) => status.success(),
             Err(_) => false,
         }
     }
