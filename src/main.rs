@@ -72,6 +72,20 @@ enum Commands {
         )]
         profile_name: String,
     },
+    /// Update profile settings
+    Set {
+        #[arg(
+            value_name = "PROFILE_NAME",
+            help = "Name of the AWS profile to update"
+        )]
+        profile_name: String,
+        /// Mark as a production account
+        #[arg(long, conflicts_with = "no_production")]
+        production: bool,
+        /// Unmark as a production account
+        #[arg(long)]
+        no_production: bool,
+    },
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -304,6 +318,15 @@ impl KeeManager {
 
         // Save to kee config
         let mut config = self.load_config();
+
+        // Ask if this is a production account
+        let production = self.prompt_user(&format!(
+            "\n Is {} a production account? (y/N): ",
+            hlt(profile_name)
+        ))?;
+        let mut profile_info = profile_info;
+        profile_info.production = production;
+
         config
             .profiles
             .insert(profile_name.to_string(), profile_info);
@@ -400,6 +423,40 @@ impl KeeManager {
             }
         }
 
+        Ok(true)
+    }
+
+    fn set_profile(
+        &self,
+        profile_name: &str,
+        production: bool,
+        no_production: bool,
+    ) -> io::Result<bool> {
+        let mut config = self.load_config();
+
+        let profile = match config.profiles.get_mut(profile_name) {
+            Some(p) => p,
+            None => {
+                println!("\n [!] Profile '{}' not found.", hlt(profile_name));
+                return Ok(false);
+            }
+        };
+
+        if production {
+            profile.production = true;
+            println!(
+                "\n [✓] Profile '{}' marked as production.",
+                hlt(profile_name)
+            );
+        } else if no_production {
+            profile.production = false;
+            println!(
+                "\n [✓] Profile '{}' unmarked as production.",
+                hlt(profile_name)
+            );
+        }
+
+        self.save_config(&config)?;
         Ok(true)
     }
 
@@ -540,6 +597,9 @@ impl KeeManager {
         };
 
         // Show banner
+        if profile_info.production {
+            println!("\n \x1b[1;31m⚠️  PRODUCTION ACCOUNT\x1b[0m");
+        }
         println!("\n Profile: {}", hlt(profile_name));
         println!(" {} is starting a sub-shell...", hlt("Kee"));
         println!(" Type {} to return to your main shell.", hlt("exit"));
@@ -617,6 +677,13 @@ fn main() -> io::Result<()> {
         }
         Commands::Rm { profile_name } => {
             kee.remove_profile(&profile_name)?;
+        }
+        Commands::Set {
+            profile_name,
+            production,
+            no_production,
+        } => {
+            kee.set_profile(&profile_name, production, no_production)?;
         }
     }
 

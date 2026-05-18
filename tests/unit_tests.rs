@@ -25,6 +25,7 @@ mod config_tests {
             sso_account_id: "123456789012".to_string(),
             sso_role_name: "TestRole".to_string(),
             session_name: "test-session".to_string(),
+            production: false,
         };
 
         assert_eq!(profile.profile_name, "test-profile");
@@ -42,6 +43,7 @@ mod config_tests {
             sso_account_id: "123456789012".to_string(),
             sso_role_name: "TestRole".to_string(),
             session_name: "test-session".to_string(),
+            production: false,
         };
 
         config.profiles.insert("test".to_string(), profile.clone());
@@ -70,6 +72,7 @@ mod config_tests {
             sso_account_id: "111111111111".to_string(),
             sso_role_name: "ProdRole".to_string(),
             session_name: "prod-session".to_string(),
+            production: false,
         };
 
         let profile2 = ProfileInfo {
@@ -79,6 +82,7 @@ mod config_tests {
             sso_account_id: "222222222222".to_string(),
             sso_role_name: "DevRole".to_string(),
             session_name: "dev-session".to_string(),
+            production: false,
         };
 
         config.profiles.insert("prod".to_string(), profile1.clone());
@@ -120,6 +124,7 @@ mod file_operations_tests {
             sso_account_id: "123456789012".to_string(),
             sso_role_name: "TestRole".to_string(),
             session_name: "test-session".to_string(),
+            production: false,
         };
 
         original_config.profiles.insert("test".to_string(), profile);
@@ -169,6 +174,7 @@ mod utility_tests {
             sso_account_id: "123456789012".to_string(),
             sso_role_name: "TestRole".to_string(),
             session_name: "session".to_string(),
+            production: false,
         };
 
         let cloned = profile.clone();

@@ -15,10 +15,11 @@ A simple tool to help you manage multiple AWS profiles, with SSO support and eas
 - 🚀 **Easy profile access**: Use any configured profile with a single command
 - 🐚 **Sub-shell isolation**: Each profile runs in its own sub-shell with proper credential isolation
 - 📝 **Custom aliases**: Use friendly names for your AWS profiles
-- 🔍 **Profile management**: Easily list, add, and remove profiles
+- 🔍 **Profile management**: Easily list, add, update, and remove profiles
 - 🚫 **No stored credentials**: No AWS credentials are stored anywhere - uses AWS SSO tokens
 - 🎨 **Shell integration**: Shows current profile in your shell prompt
-- ⚡ **Auto-refresh**: Automatically handles SSO token refresh when needed
+- ⚡ **Auto-refresh**: Proactively refreshes tokens on every use and keeps sessions alive in the background
+- 🚨 **Production safety**: Mark accounts as production to get a visible warning banner
 
 ## Security notes
 
@@ -143,7 +144,7 @@ aws:mycompany.dev $ exit  # Terminate the session and return to your main shell
 kee add PROFILE_NAME
 ```
 
-Interactively configure a new AWS profile with SSO settings.
+Interactively configure a new AWS profile with SSO settings. You'll be asked whether this is a production account — production profiles display a warning banner when active.
 
 ### Use a profile
 
@@ -151,7 +152,7 @@ Interactively configure a new AWS profile with SSO settings.
 kee use PROFILE_NAME
 ```
 
-Use a profile and start a sub-shell with its AWS credentials.
+Use a profile and start a sub-shell with its AWS credentials. Every `kee use` proactively refreshes the token to give you the maximum session window.
 
 ### List all profiles
 
@@ -168,6 +169,15 @@ kee current
 ```
 
 Display which profile is currently active (if any).
+
+### Update profile settings
+
+```bash
+kee set PROFILE_NAME --production       # Mark as production
+kee set PROFILE_NAME --no-production    # Unmark as production
+```
+
+Update settings for an existing profile.
 
 ### Remove a profile
 
@@ -196,13 +206,19 @@ When you use a profile, `Kee`:
 
 ### Session management
 
-When you run `kee use`, your session is validated automatically. If your SSO access token has expired, `Kee` will attempt a silent refresh using the cached refresh token — no browser required. If the refresh token is also expired or unavailable, it falls back to the full `aws sso login` flow.
+When you run `kee use`, your session is refreshed proactively — every invocation gives you the maximum session window regardless of how much time was left.
+
+While the sub-shell is active, a background process monitors the token's expiry and refreshes it automatically before it lapses. This means your session stays alive indefinitely as long as the sub-shell is open (limited only by the refresh token registration, typically ~3 months).
+
+If the refresh token is expired or unavailable, `Kee` falls back to the full `aws sso login` flow.
 
 ```
- ⠹ Validating session...
- [!] Your session has expired. Refreshing...
- ⠼ Refreshing token...
+ ⠹ Refreshing session...
  [✓] Session refreshed.
+
+ Profile: mycompany.dev
+ Kee is starting a sub-shell...
+ Type exit to return to your main shell.
 ```
 
 `Kee` also prevents you from starting a sub-shell while already in one:
@@ -221,6 +237,19 @@ Your shell prompt will show the active profile:
 ```bash
 (mycompany.dev) user@hostname:
 ```
+
+### Production safety
+
+Profiles marked as production display a bold red warning when you enter the sub-shell:
+
+```
+ Profile: mycompany.prod
+ ⚠️  PRODUCTION ACCOUNT
+ Kee is starting a sub-shell...
+ Type exit to return to your main shell.
+```
+
+Mark a profile as production during `kee add` or at any time with `kee set PROFILE_NAME --production`.
 
 ## Environment variables
 
@@ -241,15 +270,16 @@ These variables help `Kee` manage sessions and prevent nested sub-shells.
 {
   "profiles": {
     "mycompany-prod": {
-      "profile_name": "mycompany.dev",
+      "profile_name": "mycompany.prod",
       "sso_start_url": "https://mycompany.awsapps.com/start",
       "sso_region": "ap-southeast-2",
       "sso_account_id": "123456789012",
       "sso_role_name": "AdministratorAccess",
-      "session_name": "mycompany"
+      "session_name": "mycompany",
+      "production": true
     }
   },
-  "current_account": null
+  "current_profile": null
 }
 ```
 
@@ -317,8 +347,6 @@ aws sso login --profile PROFILE_NAME
 
 ## Future enhancements
 
-- **Async AWS API calls** for faster credential validation
-- **Parallel profile operations** for bulk management
 - **Built-in AWS SDK** integration (no AWS CLI dependency)
 - **Configuration validation** at compile time
 - **Plugin system** with dynamic loading
@@ -333,10 +361,10 @@ aws sso login --profile PROFILE_NAME
 
 **Package managers:**
 
-- **Cargo**: `cargo install kee` (when published)
-- **Homebrew**: `brew install kee` (when published)
-- **Scoop**: `scoop install kee` (Windows, when published)
-- **APT/YUM**: Native packages possible (when published)
+- **Cargo**: `cargo install kee`
+- **Homebrew**: `brew install kee` (planned)
+- **Scoop**: `scoop install kee` (Windows, planned)
+- **APT/YUM**: Native packages possible (planned)
 
 ## Contributing
 

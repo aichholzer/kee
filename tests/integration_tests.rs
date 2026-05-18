@@ -252,6 +252,7 @@ mod config_file_tests {
             sso_account_id: "123456789012".to_string(),
             sso_role_name: "TestRole".to_string(),
             session_name: "test-session".to_string(),
+            production: false,
         };
 
         original_config
@@ -287,6 +288,7 @@ mod config_file_tests {
             sso_account_id: "111111111111".to_string(),
             sso_role_name: "ProdRole".to_string(),
             session_name: "prod-session".to_string(),
+            production: false,
         };
 
         let profile2 = ProfileInfo {
@@ -296,6 +298,7 @@ mod config_file_tests {
             sso_account_id: "222222222222".to_string(),
             sso_role_name: "DevRole".to_string(),
             session_name: "dev-session".to_string(),
+            production: false,
         };
 
         // Add profiles

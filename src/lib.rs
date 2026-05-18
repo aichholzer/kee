@@ -58,6 +58,7 @@ mod tests {
             sso_account_id: "123456789012".to_string(),
             sso_role_name: "TestRole".to_string(),
             session_name: "test-session".to_string(),
+            production: false,
         };
 
         let json = serde_json::to_string(&profile).unwrap();
@@ -91,6 +92,7 @@ mod tests {
             sso_account_id: "123456789012".to_string(),
             sso_role_name: "TestRole".to_string(),
             session_name: "test-session".to_string(),
+            production: false,
         };
 
         config.add_profile("test".to_string(), profile.clone());
@@ -110,6 +112,7 @@ mod tests {
             sso_account_id: "123456789012".to_string(),
             sso_role_name: "TestRole".to_string(),
             session_name: "test-session".to_string(),
+            production: false,
         };
 
         config.add_profile("test".to_string(), profile.clone());
@@ -139,6 +142,7 @@ mod tests {
             sso_account_id: "123456789012".to_string(),
             sso_role_name: "TestRole".to_string(),
             session_name: "test-session".to_string(),
+            production: false,
         };
 
         config.add_profile("test".to_string(), profile.clone());
@@ -157,6 +161,7 @@ mod tests {
             sso_account_id: "123456789012".to_string(),
             sso_role_name: "TestRole".to_string(),
             session_name: "test-session1".to_string(),
+            production: false,
         };
         let profile2 = ProfileInfo {
             profile_name: "kee-test2".to_string(),
@@ -165,6 +170,7 @@ mod tests {
             sso_account_id: "123456789013".to_string(),
             sso_role_name: "TestRole2".to_string(),
             session_name: "test-session2".to_string(),
+            production: false,
         };
 
         config.add_profile("test1".to_string(), profile1);
@@ -199,6 +205,7 @@ mod tests {
             sso_account_id: "123456789012".to_string(),
             sso_role_name: "TestRole".to_string(),
             session_name: "test-session".to_string(),
+            production: false,
         };
 
         config.add_profile("test".to_string(), profile);

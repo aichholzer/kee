@@ -15,6 +15,8 @@ pub struct ProfileInfo {
     pub sso_account_id: String,
     pub sso_role_name: String,
     pub session_name: String,
+    #[serde(default)]
+    pub production: bool,
 }
 
 #[allow(dead_code)]
@@ -138,6 +140,7 @@ impl AwsManager {
             sso_account_id,
             sso_role_name,
             session_name,
+            production: false,
         })
     }
 

@@ -7,13 +7,13 @@ _kee_completion() {
 
   case ${COMP_CWORD} in
     1)
-      opts="add use ls current rm help"
+      opts="add use ls current rm set help"
       COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
       return 0
       ;;
     2)
       case "${prev}" in
-        use|rm)
+        use|rm|set)
           # Get account names dynamically
           local accounts=$(${COMP_WORDS[0]} ls --names 2>/dev/null)
           COMPREPLY=( $(compgen -W "${accounts}" -- "${cur}") )
@@ -30,6 +30,14 @@ _kee_completion() {
       esac
       ;;
     *)
+      # Handle flags for commands that accept them after the profile name
+      case "${COMP_WORDS[1]}" in
+        set)
+          opts="--production --no-production"
+          COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+          return 0
+          ;;
+      esac
       ;;
   esac
 }
