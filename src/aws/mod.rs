@@ -18,6 +18,7 @@ pub struct ProfileInfo {
 }
 
 #[allow(dead_code)]
+#[derive(Clone)]
 pub struct AwsManager {
     aws_config_file: PathBuf,
     sso_cache_dir: PathBuf,
@@ -206,6 +207,14 @@ impl AwsManager {
         fs::write(&cache_file, json).ok()?;
 
         Some(())
+    }
+
+    /// Read the expiry timestamp of the cached SSO token for the given profile.
+    pub fn read_token_expiry(&self, profile_info: &ProfileInfo) -> Option<chrono::DateTime<Utc>> {
+        let cache_file = self.find_sso_cache_file(profile_info)?;
+        let content = fs::read_to_string(&cache_file).ok()?;
+        let cache: SsoTokenCache = serde_json::from_str(&content).ok()?;
+        cache.expires_at?.parse::<chrono::DateTime<Utc>>().ok()
     }
 
     /// Find the SSO cache file for a given profile by matching the start URL or session name.

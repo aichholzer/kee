@@ -145,6 +145,68 @@ impl Drop for Spinner {
     }
 }
 
+/// Buffer before token expiry at which we refresh, in seconds.
+const REFRESH_BUFFER_SECS: i64 = 300;
+/// Fallback sleep duration if expiry can't be read, in seconds.
+const REFRESH_FALLBACK_SECS: u64 = 1800;
+
+/// Background thread that keeps the SSO session fresh while a sub-shell is active.
+struct SessionRefresher {
+    running: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl SessionRefresher {
+    fn start(aws_manager: AwsManager, profile_info: ProfileInfo) -> Self {
+        let running = Arc::new(AtomicBool::new(true));
+        let running_clone = Arc::clone(&running);
+
+        let handle = thread::spawn(move || {
+            while running_clone.load(Ordering::Relaxed) {
+                // Decide how long to sleep based on the current token expiry.
+                let sleep_secs = match aws_manager.read_token_expiry(&profile_info) {
+                    Some(expires_at) => {
+                        let remaining =
+                            (expires_at - chrono::Utc::now()).num_seconds() - REFRESH_BUFFER_SECS;
+                        // If we're already within the buffer, refresh immediately.
+                        remaining.max(0) as u64
+                    }
+                    None => REFRESH_FALLBACK_SECS,
+                };
+
+                // Sleep in short ticks so we exit promptly when signalled.
+                let mut slept = 0u64;
+                while slept < sleep_secs && running_clone.load(Ordering::Relaxed) {
+                    thread::sleep(Duration::from_secs(1));
+                    slept += 1;
+                }
+
+                if !running_clone.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                // Refresh. We ignore failures — the user will hit them on next AWS call
+                // and can re-authenticate explicitly.
+                let _ = aws_manager.try_refresh_token(&profile_info);
+            }
+        });
+
+        Self {
+            running,
+            handle: Some(handle),
+        }
+    }
+}
+
+impl Drop for SessionRefresher {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 impl KeeManager {
     fn prompt_user(&self, message: &str) -> io::Result<bool> {
         print!("{message}");
@@ -393,22 +455,22 @@ impl KeeManager {
             }
         }
 
-        let profile_info = config.profiles.get(profile_name).unwrap();
-        let profile_name = &profile_info.profile_name;
+        let profile_info = config.profiles.get(profile_name).unwrap().clone();
+        let profile_name = profile_info.profile_name.clone();
 
         // Always attempt a token refresh to maximise session duration
         println!();
         let spinner = Spinner::start("Refreshing session...");
-        let refreshed = self.aws_manager.try_refresh_token(profile_info)
-            && self.check_credentials(profile_name);
+        let refreshed = self.aws_manager.try_refresh_token(&profile_info)
+            && self.check_credentials(&profile_name);
 
         if refreshed {
             spinner.stop(" [✓] Session refreshed.");
-        } else if self.check_credentials(profile_name) {
+        } else if self.check_credentials(&profile_name) {
             spinner.stop(" [✓] Session is valid.");
         } else {
             spinner.stop(" [!] Session expired. Opening SSO login...");
-            if !self.sso_login(profile_name)? {
+            if !self.sso_login(&profile_name)? {
                 println!(
                     " [X] Failed to authenticate. Please run {} manually.",
                     hlt("aws sso login")
@@ -418,11 +480,11 @@ impl KeeManager {
         }
 
         // Update current profile
-        config.current_profile = Some(profile_name.to_string());
+        config.current_profile = Some(profile_name.clone());
         self.save_config(&config)?;
 
         // Start subshell
-        self.start_subshell(profile_name)?;
+        self.start_subshell(&profile_info)?;
 
         // Clear current profile when subshell exits
         config.current_profile = None;
@@ -467,7 +529,9 @@ impl KeeManager {
         Ok(status.success())
     }
 
-    fn start_subshell(&self, profile_name: &str) -> io::Result<()> {
+    fn start_subshell(&self, profile_info: &ProfileInfo) -> io::Result<()> {
+        let profile_name = &profile_info.profile_name;
+
         // Get current shell
         let shell = if cfg!(windows) {
             env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
@@ -494,6 +558,10 @@ impl KeeManager {
                 cmd.env("PS1", format!("aws:{profile_name} $ "));
             }
         }
+
+        // Keep the session refreshed in the background while the sub-shell is alive.
+        // Dropped automatically when this function returns.
+        let _refresher = SessionRefresher::start(self.aws_manager.clone(), profile_info.clone());
 
         let _ = cmd.status();
 
