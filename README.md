@@ -2,7 +2,7 @@
   <img src="https://raw.githubusercontent.com/aichholzer/kee/refs/heads/main/kee.png" alt="Kee" />
 </div>
 
-![OSX](https://img.shields.io/badge/-OSX-black) ![OSX](https://img.shields.io/badge/-Linux-red) ![OSX](https://img.shields.io/badge/-Windows-blue)
+[![Tests](https://github.com/aichholzer/kee/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/aichholzer/kee/actions/workflows/test.yml) ![OSX](https://img.shields.io/badge/-OSX-black) ![Linux](https://img.shields.io/badge/-Linux-red) ![Windows](https://img.shields.io/badge/-Windows-blue)
 
 A simple tool to help you manage multiple AWS profiles, with SSO support and easy account access.
 
@@ -13,7 +13,9 @@ A simple tool to help you manage multiple AWS profiles, with SSO support and eas
 
 - 🔐 **SSO integration**: Full support for AWS SSO authentication
 - 🚀 **Easy profile access**: Use any configured profile with a single command
+- 🎯 **Interactive picker**: Run `kee use` with no arguments to pick a profile with fuzzy search
 - 🐚 **Sub-shell isolation**: Each profile runs in its own sub-shell with proper credential isolation
+- ⚙️ **One-shot commands**: Run a single command with a profile's credentials via `kee run` or `kee aws`
 - 📝 **Custom aliases**: Use friendly names for your AWS profiles
 - 🔍 **Profile management**: Easily list, add, update, and remove profiles
 - 🚫 **No stored credentials**: No AWS credentials are stored anywhere - uses AWS SSO tokens
@@ -115,11 +117,19 @@ This will:
 
 ### 2. Use a profile
 
+Pick interactively:
+
+```bash
+kee use
+```
+
+Or jump straight to one by name:
+
 ```bash
 kee use mycompany.dev
 ```
 
-This will:
+Either path will:
 
 - Check if SSO credentials are valid
 - Automatically run `aws sso login` if needed
@@ -138,6 +148,14 @@ aws:mycompany.dev $ exit  # Terminate the session and return to your main shell
 
 ## Commands
 
+### Show status or help
+
+```bash
+kee
+```
+
+With no arguments, Kee shows the current active profile if you are inside a session, or prints help text otherwise.
+
 ### Add a profile
 
 ```bash
@@ -149,10 +167,40 @@ Interactively configure a new AWS profile with SSO settings. You'll be asked whe
 ### Use a profile
 
 ```bash
-kee use PROFILE_NAME
+kee use                # Pick interactively with fuzzy search
+kee use PROFILE_NAME   # Skip the picker
 ```
 
-Use a profile and start a sub-shell with its AWS credentials. Every `kee use` proactively refreshes the token to give you the maximum session window.
+Use a profile and start a sub-shell with its AWS credentials. With no name, Kee opens a fuzzy picker over your configured profiles. Every `kee use` proactively refreshes the token to give you the maximum session window.
+
+### Run a single command
+
+Use `kee aws` for AWS CLI commands (the common case):
+
+```bash
+kee aws PROFILE_NAME ARGS...
+```
+
+```bash
+kee aws mycompany.dev s3 ls
+kee aws mycompany.dev sts get-caller-identity
+```
+
+For anything else, use `kee run`:
+
+```bash
+kee run PROFILE_NAME -- CMD ARGS...
+```
+
+```bash
+kee run mycompany.dev -- terraform plan
+kee run mycompany.dev -- ./deploy.sh
+kee run mycompany.dev -- aws s3 ls    # works too, just longer
+```
+
+Both run a single command with the profile's credentials and exit. No sub-shell, no prompt change. The wrapped command's exit code is propagated. Kee's own status messages go to stderr so they don't pollute the wrapped command's stdout. Production profiles still print a warning banner to stderr.
+
+The `--` separator in `kee run` is recommended any time the wrapped command starts with a flag, so Kee doesn't try to interpret it.
 
 ### List all profiles
 
@@ -182,7 +230,8 @@ Update settings for an existing profile.
 ### Remove a profile
 
 ```bash
-kee rm PROFILE_NAME
+kee rm                 # Pick interactively
+kee rm PROFILE_NAME    # Skip the picker
 ```
 
 Removes a profile configuration from `Kee` and the AWS config file.

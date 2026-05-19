@@ -10,19 +10,21 @@ _kee() {
       # First argument - show commands
       local -a commands
       commands=(
-        'add:Add a new AWS account'
-        'use:Use an account'
-        'ls:List all configured accounts'
-        'current:Show current active account'
-        'rm:Remove an account'
+        'add:Add a new AWS profile'
+        'use:Use a profile (interactive picker if no name given)'
+        'ls:List all configured profiles'
+        'current:Show current active profile'
+        'rm:Remove a profile (interactive picker if no name given)'
         'set:Update profile settings'
+        'run:Run a command with a profile (no sub-shell)'
+        'aws:Run an AWS CLI command with a profile'
       )
       _describe 'commands' commands
       ;;
     3)
       # Second argument - depends on the command
       case ${words[2]} in
-        use|rm|set)
+        use|rm|set|run|aws)
           # Get real account names from kee
           local -a accounts
           local account_output

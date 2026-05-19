@@ -38,10 +38,10 @@ const AWS_PAGER: &str = "AWS_PAGER";
 #[command(name = "kee")]
 #[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = format!("{KEE_ART}\n V. {}", env!("CARGO_PKG_VERSION")))]
-#[command(long_about = format!("{KEE_ART}\n V. {}\n\nExamples:\n  kee add myprofile          Add a new AWS profile\n  kee use myprofile          Use an available profile (starts sub-shell)\n  kee ls                     List all available profiles\n  kee current                Show current, active profile\n  kee rm myprofile           Remove a profile configuration", env!("CARGO_PKG_VERSION")))]
+#[command(long_about = format!("{KEE_ART}\n V. {}\n\nExamples:\n  kee                        Show current profile or this help\n  kee add myprofile          Add a new AWS profile\n  kee use                    Pick a profile interactively (starts sub-shell)\n  kee use myprofile          Use a specific profile (starts sub-shell)\n  kee aws myprofile s3 ls    Run an AWS CLI command with a profile\n  kee run myprofile -- CMD   Run any command with a profile (no sub-shell)\n  kee ls                     List all available profiles\n  kee current                Show current, active profile\n  kee rm                     Pick a profile to remove interactively\n  kee rm myprofile           Remove a specific profile", env!("CARGO_PKG_VERSION")))]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -53,8 +53,11 @@ enum Commands {
     },
     /// Use an available profile
     Use {
-        #[arg(value_name = "PROFILE_NAME", help = "Name of the AWS profile to use")]
-        profile_name: String,
+        #[arg(
+            value_name = "PROFILE_NAME",
+            help = "Name of the AWS profile to use (interactive picker if omitted)"
+        )]
+        profile_name: Option<String>,
     },
     /// List all available profiles
     Ls {
@@ -68,9 +71,39 @@ enum Commands {
     Rm {
         #[arg(
             value_name = "PROFILE_NAME",
-            help = "Name of the AWS profile to remove"
+            help = "Name of the AWS profile to remove (interactive picker if omitted)"
+        )]
+        profile_name: Option<String>,
+    },
+    /// Run a command with a profile's credentials (no sub-shell)
+    Run {
+        #[arg(
+            value_name = "PROFILE_NAME",
+            help = "Name of the AWS profile to use for the command"
         )]
         profile_name: String,
+        #[arg(
+            value_name = "COMMAND",
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            help = "Command and arguments to run (use -- before flags)"
+        )]
+        cmd: Vec<String>,
+    },
+    /// Run an AWS CLI command with a profile's credentials (sugar over `run`)
+    Aws {
+        #[arg(
+            value_name = "PROFILE_NAME",
+            help = "Name of the AWS profile to use for the command"
+        )]
+        profile_name: String,
+        #[arg(
+            value_name = "ARGS",
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            help = "Arguments to pass to 'aws' (e.g. s3 ls)"
+        )]
+        args: Vec<String>,
     },
     /// Update profile settings
     Set {
@@ -247,6 +280,34 @@ impl KeeManager {
         io::stdin().read_line(&mut input)?;
 
         Ok(input.trim().to_lowercase() == "y")
+    }
+
+    /// Show a fuzzy picker over configured profiles. Returns the chosen profile
+    /// name, or None if there are no profiles or the user aborted.
+    fn pick_profile(&self, prompt: &str) -> io::Result<Option<String>> {
+        let config = self.load_config();
+
+        if config.profiles.is_empty() {
+            println!(
+                "\n [!] No profiles configured.\n Run {} to add one.",
+                hlt("kee add PROFILE_NAME")
+            );
+            return Ok(None);
+        }
+
+        // Sorted for stable ordering across invocations.
+        let mut names: Vec<String> = config.profiles.keys().cloned().collect();
+        names.sort();
+
+        let selection =
+            dialoguer::FuzzySelect::with_theme(&dialoguer::theme::ColorfulTheme::default())
+                .with_prompt(prompt)
+                .items(&names)
+                .default(0)
+                .interact_opt()
+                .map_err(io::Error::other)?;
+
+        Ok(selection.map(|i| names[i].clone()))
     }
 
     fn new() -> io::Result<Self> {
@@ -567,6 +628,66 @@ impl KeeManager {
         Ok(true)
     }
 
+    /// Run a single command with the chosen profile's credentials and exit
+    /// with the command's exit code. No sub-shell. Output of the wrapped
+    /// command is left untouched (Kee's own status messages go to stderr).
+    fn run_command(&self, profile_name: &str, cmd: &[String]) -> io::Result<i32> {
+        if cmd.is_empty() {
+            eprintln!("\n [X] Please specify a command to run");
+            eprintln!(" Usage: {}", hlt("kee run PROFILE_NAME -- CMD ARGS..."));
+            return Ok(2);
+        }
+
+        let config = self.load_config();
+        let profile_info = match config.profiles.get(profile_name) {
+            Some(p) => p.clone(),
+            None => {
+                eprintln!("\n [!] Profile '{}' not found.", hlt(profile_name));
+                eprintln!(" Run {} to see available profiles.", hlt("kee ls"));
+                return Ok(1);
+            }
+        };
+        let aws_profile = profile_info.profile_name.clone();
+
+        // Ensure credentials are usable. Try a refresh, then validate, then
+        // fall back to interactive sso login. All status to stderr so we don't
+        // contaminate the wrapped command's stdout.
+        let _ = self.aws_manager.try_refresh_token(&profile_info);
+        if !self.check_credentials(&aws_profile) {
+            eprintln!(
+                " Kee: session expired for '{}', running 'aws sso login'...",
+                hlt(&aws_profile)
+            );
+            if !self.sso_login(&aws_profile)? || !self.check_credentials(&aws_profile) {
+                eprintln!(
+                    " [X] Failed to authenticate. Please run {} manually.",
+                    hlt("aws sso login")
+                );
+                return Ok(1);
+            }
+        }
+
+        if profile_info.production {
+            eprintln!(" \x1b[1;31m⚠️  PRODUCTION ACCOUNT ({})\x1b[0m", aws_profile);
+        }
+
+        let (program, args) = cmd.split_first().unwrap();
+        let status = Command::new(program)
+            .args(args)
+            .env(AWS_PROFILE, &aws_profile)
+            .env(KEE_CURRENT_PROFILE, &aws_profile)
+            .env(KEE_ACTIVE_PROFILE, "1")
+            .status();
+
+        match status {
+            Ok(s) => Ok(s.code().unwrap_or(1)),
+            Err(e) => {
+                eprintln!(" [X] Failed to execute '{}': {}", program, e);
+                Ok(127)
+            }
+        }
+    }
+
     fn current_profile(&self) {
         // Check if in active session
         if let Ok(current) = env::var(KEE_CURRENT_PROFILE) {
@@ -651,25 +772,14 @@ fn main() -> io::Result<()> {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(err) => {
-            // Check if it's a missing argument error and customize the message
+            // Customise the missing-arg error for `kee add` only; `use` and `rm`
+            // accept an optional name and fall through to a picker.
             if err.kind() == clap::error::ErrorKind::MissingRequiredArgument {
                 let error_msg = err.to_string();
-                if error_msg.contains("<PROFILE_NAME>") {
-                    if error_msg.contains("kee use") {
-                        eprintln!("\n [X] Please specify a profile to use");
-                        eprintln!(" Usage: {}", hlt("kee use PROFILE_NAME"));
-                        eprintln!("\n Run {} to see your available profiles", hlt("kee ls"));
-                        std::process::exit(2);
-                    } else if error_msg.contains("kee add") {
-                        eprintln!("\n [X] Please specify a name for the new profile");
-                        eprintln!(" Usage: {}", hlt("kee add PROFILE_NAME"));
-                        std::process::exit(2);
-                    } else if error_msg.contains("kee rm") {
-                        eprintln!("\n [X] Please specify the profile to remove");
-                        eprintln!(" Usage: {}", hlt("kee rm PROFILE_NAME"));
-                        eprintln!("\n Run {} to see your available profiles", hlt("kee ls"));
-                        std::process::exit(2);
-                    }
+                if error_msg.contains("<PROFILE_NAME>") && error_msg.contains("kee add") {
+                    eprintln!("\n [X] Please specify a name for the new profile");
+                    eprintln!(" Usage: {}", hlt("kee add PROFILE_NAME"));
+                    std::process::exit(2);
                 }
             }
             // For all other errors, use clap's default handling
@@ -679,12 +789,37 @@ fn main() -> io::Result<()> {
 
     let kee = KeeManager::new()?;
 
-    match cli.command {
+    // No subcommand: show the current session if active, otherwise print help.
+    // Only KEE_ACTIVE_PROFILE counts as "in a session" — the config field can
+    // go stale if a sub-shell exits abnormally.
+    let command = match cli.command {
+        Some(c) => c,
+        None => {
+            if env::var(KEE_ACTIVE_PROFILE).is_ok() {
+                kee.current_profile();
+                return Ok(());
+            }
+            // Re-parse with --help so clap prints and exits.
+            let _ = Cli::try_parse_from(["kee", "--help"])
+                .err()
+                .map(|e| e.exit());
+            return Ok(());
+        }
+    };
+
+    match command {
         Commands::Add { profile_name } => {
             kee.add_profile(&profile_name)?;
         }
         Commands::Use { profile_name } => {
-            kee.use_profile(&profile_name)?;
+            let name = match profile_name {
+                Some(n) => n,
+                None => match kee.pick_profile("Which profile?")? {
+                    Some(n) => n,
+                    None => return Ok(()),
+                },
+            };
+            kee.use_profile(&name)?;
         }
         Commands::Ls { names } => {
             kee.list_profiles(names);
@@ -693,7 +828,14 @@ fn main() -> io::Result<()> {
             kee.current_profile();
         }
         Commands::Rm { profile_name } => {
-            kee.remove_profile(&profile_name)?;
+            let name = match profile_name {
+                Some(n) => n,
+                None => match kee.pick_profile("Which profile?")? {
+                    Some(n) => n,
+                    None => return Ok(()),
+                },
+            };
+            kee.remove_profile(&name)?;
         }
         Commands::Set {
             profile_name,
@@ -701,6 +843,18 @@ fn main() -> io::Result<()> {
             no_production,
         } => {
             kee.set_profile(&profile_name, production, no_production)?;
+        }
+        Commands::Run { profile_name, cmd } => {
+            let code = kee.run_command(&profile_name, &cmd)?;
+            std::process::exit(code);
+        }
+        Commands::Aws { profile_name, args } => {
+            // Sugar: prepend "aws" and dispatch through run_command.
+            let mut cmd = Vec::with_capacity(args.len() + 1);
+            cmd.push("aws".to_string());
+            cmd.extend(args);
+            let code = kee.run_command(&profile_name, &cmd)?;
+            std::process::exit(code);
         }
     }
 
