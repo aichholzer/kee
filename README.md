@@ -2,12 +2,9 @@
   <img src="https://raw.githubusercontent.com/aichholzer/kee/refs/heads/main/kee.png" alt="Kee" />
 </div>
 
-[![Tests](https://github.com/aichholzer/kee/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/aichholzer/kee/actions/workflows/test.yml) ![OSX](https://img.shields.io/badge/-OSX-black) ![Linux](https://img.shields.io/badge/-Linux-red) ![Windows](https://img.shields.io/badge/-Windows-blue)
+[![Tests](https://github.com/aichholzer/kee/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/aichholzer/kee/actions/workflows/test.yml) [![Latest version](https://img.shields.io/crates/v/kee.svg)](https://crates.io/crates/kee) ![License](https://img.shields.io/crates/l/kee.svg)<br />![OSX](https://img.shields.io/badge/-OSX-black) ![Linux](https://img.shields.io/badge/-Linux-red) ![Windows](https://img.shields.io/badge/-Windows-blue)
 
 A simple tool to help you manage multiple AWS profiles, with SSO support and easy account access.
-
-> 🦀 — There's also **Python** [implementation](https://github.com/aichholzer/kee.py).<br />
-> However, this version might not receive updates or new features.
 
 ## Features
 
@@ -292,8 +289,9 @@ Your shell prompt will show the active profile:
 Profiles marked as production display a bold red warning when you enter the sub-shell:
 
 ```
- Profile: mycompany.prod
  ⚠️  PRODUCTION ACCOUNT
+
+ Profile: mycompany.prod
  Kee is starting a sub-shell...
  Type exit to return to your main shell.
 ```
