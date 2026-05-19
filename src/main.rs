@@ -176,6 +176,7 @@ impl SessionRefresher {
         let running_clone = Arc::clone(&running);
 
         let handle = thread::spawn(move || {
+            let mut last_ok = true;
             while running_clone.load(Ordering::Relaxed) {
                 // Decide how long to sleep based on the current token expiry.
                 let sleep_secs = match aws_manager.read_token_expiry(&profile_info) {
@@ -199,9 +200,25 @@ impl SessionRefresher {
                     break;
                 }
 
-                // Refresh. We ignore failures — the user will hit them on next AWS call
-                // and can re-authenticate explicitly.
-                let _ = aws_manager.try_refresh_token(&profile_info);
+                // Refresh. Surface state transitions to the user via stderr so a
+                // silently-dying session is at least visible in the sub-shell.
+                let ok = aws_manager.try_refresh_token(&profile_info);
+                match (last_ok, ok) {
+                    (true, false) => {
+                        eprintln!(
+                            "\n Kee: background session refresh failed for '{}'.\n      Run 'aws sso login --profile {}' if AWS calls start failing.",
+                            profile_info.profile_name, profile_info.profile_name
+                        );
+                    }
+                    (false, true) => {
+                        eprintln!(
+                            "\n Kee: background session refresh recovered for '{}'.",
+                            profile_info.profile_name
+                        );
+                    }
+                    _ => {}
+                }
+                last_ok = ok;
             }
         });
 

@@ -207,7 +207,19 @@ impl AwsManager {
         };
 
         let json = serde_json::to_string_pretty(&updated).ok()?;
-        fs::write(&cache_file, json).ok()?;
+
+        // Write atomically: tmp file + rename. A non-atomic fs::write truncates
+        // the cache file before the new contents land, and the AWS CLI can read
+        // it mid-write while minting role credentials.
+        let tmp = cache_file.with_extension("json.tmp");
+        if fs::write(&tmp, json).is_err() {
+            let _ = fs::remove_file(&tmp);
+            return None;
+        }
+        if fs::rename(&tmp, &cache_file).is_err() {
+            let _ = fs::remove_file(&tmp);
+            return None;
+        }
 
         Some(())
     }
