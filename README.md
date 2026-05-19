@@ -13,6 +13,7 @@ A simple tool to help you manage multiple AWS profiles, with SSO support and eas
 - 🎯 **Interactive picker**: Run `kee use` with no arguments to pick a profile with fuzzy search
 - 🐚 **Sub-shell isolation**: Each profile runs in its own sub-shell with proper credential isolation
 - ⚙️ **One-shot commands**: Run a single command with a profile's credentials via `kee run` or `kee aws`
+- 🌐 **Open the console**: `kee console` opens the AWS Management Console in your browser for the chosen profile
 - 📝 **Custom aliases**: Use friendly names for your AWS profiles
 - 🔍 **Profile management**: Easily list, add, update, and remove profiles
 - 🚫 **No stored credentials**: No AWS credentials are stored anywhere - uses AWS SSO tokens
@@ -198,6 +199,19 @@ kee run mycompany.dev -- aws s3 ls    # works too, just longer
 Both run a single command with the profile's credentials and exit. No sub-shell, no prompt change. The wrapped command's exit code is propagated. Kee's own status messages go to stderr so they don't pollute the wrapped command's stdout. Production profiles still print a warning banner to stderr.
 
 The `--` separator in `kee run` is recommended any time the wrapped command starts with a flag, so Kee doesn't try to interpret it.
+
+### Open the AWS Management Console
+
+```bash
+kee console                # Use the active session, or pick interactively
+kee console PROFILE_NAME   # Open the console for a specific profile
+```
+
+Federates your temporary credentials with AWS and opens the console in your default browser, already signed in to the chosen account and role. No more flipping accounts in the console picker.
+
+The destination region matches the profile's SSO region. You can navigate to other regions from inside the console as usual.
+
+Requires AWS CLI v2.15+ (which provides `aws configure export-credentials`).
 
 ### List all profiles
 

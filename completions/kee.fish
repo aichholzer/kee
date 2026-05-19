@@ -9,9 +9,10 @@ complete -c kee -n "__fish_use_subcommand" -a "rm" -d "Remove a profile (interac
 complete -c kee -n "__fish_use_subcommand" -a "set" -d "Update profile settings"
 complete -c kee -n "__fish_use_subcommand" -a "run" -d "Run a command with a profile (no sub-shell)"
 complete -c kee -n "__fish_use_subcommand" -a "aws" -d "Run an AWS CLI command with a profile"
+complete -c kee -n "__fish_use_subcommand" -a "console" -d "Open the AWS Management Console for a profile"
 
-# Profile names for use, rm, set, run and aws commands
-complete -c kee -n "__fish_seen_subcommand_from use rm set run aws" -a "(kee ls --names 2>/dev/null)"
+# Profile names for use, rm, set, run, aws and console commands
+complete -c kee -n "__fish_seen_subcommand_from use rm set run aws console" -a "(kee ls --names 2>/dev/null)"
 
 # Flags for ls command
 complete -c kee -n "__fish_seen_subcommand_from ls" -l names -d "Only show profile names"

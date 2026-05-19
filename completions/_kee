@@ -18,13 +18,14 @@ _kee() {
         'set:Update profile settings'
         'run:Run a command with a profile (no sub-shell)'
         'aws:Run an AWS CLI command with a profile'
+        'console:Open the AWS Management Console for a profile'
       )
       _describe 'commands' commands
       ;;
     3)
       # Second argument - depends on the command
       case ${words[2]} in
-        use|rm|set|run|aws)
+        use|rm|set|run|aws|console)
           # Get real account names from kee
           local -a accounts
           local account_output

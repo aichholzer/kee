@@ -38,7 +38,7 @@ const AWS_PAGER: &str = "AWS_PAGER";
 #[command(name = "kee")]
 #[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = format!("{KEE_ART}\n V. {}", env!("CARGO_PKG_VERSION")))]
-#[command(long_about = format!("{KEE_ART}\n V. {}\n\nExamples:\n  kee                        Show current profile or this help\n  kee add myprofile          Add a new AWS profile\n  kee use                    Pick a profile interactively (starts sub-shell)\n  kee use myprofile          Use a specific profile (starts sub-shell)\n  kee aws myprofile s3 ls    Run an AWS CLI command with a profile\n  kee run myprofile -- CMD   Run any command with a profile (no sub-shell)\n  kee ls                     List all available profiles\n  kee current                Show current, active profile\n  kee rm                     Pick a profile to remove interactively\n  kee rm myprofile           Remove a specific profile", env!("CARGO_PKG_VERSION")))]
+#[command(long_about = format!("{KEE_ART}\n V. {}\n\nExamples:\n  kee                        Show current profile or this help\n  kee add myprofile          Add a new AWS profile\n  kee use                    Pick a profile interactively (starts sub-shell)\n  kee use myprofile          Use a specific profile (starts sub-shell)\n  kee aws myprofile s3 ls    Run an AWS CLI command with a profile\n  kee run myprofile -- CMD   Run any command with a profile (no sub-shell)\n  kee console                Open the AWS console (current session or picker)\n  kee console myprofile      Open the AWS console for a specific profile\n  kee ls                     List all available profiles\n  kee current                Show current, active profile\n  kee rm                     Pick a profile to remove interactively\n  kee rm myprofile           Remove a specific profile", env!("CARGO_PKG_VERSION")))]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -104,6 +104,14 @@ enum Commands {
             help = "Arguments to pass to 'aws' (e.g. s3 ls)"
         )]
         args: Vec<String>,
+    },
+    /// Open the AWS Management Console in your browser for a profile
+    Console {
+        #[arg(
+            value_name = "PROFILE_NAME",
+            help = "Name of the AWS profile (defaults to current session, then interactive picker)"
+        )]
+        profile_name: Option<String>,
     },
     /// Update profile settings
     Set {
@@ -668,7 +676,7 @@ impl KeeManager {
         }
 
         if profile_info.production {
-            eprintln!(" \x1b[1;31m⚠️  PRODUCTION ACCOUNT ({})\x1b[0m", aws_profile);
+            println!("\n \x1b[1;31m⚠️  PRODUCTION ACCOUNT\x1b[0m");
         }
 
         let (program, args) = cmd.split_first().unwrap();
@@ -686,6 +694,124 @@ impl KeeManager {
                 Ok(127)
             }
         }
+    }
+
+    /// Open the AWS Management Console in the default browser, federated as
+    /// the chosen profile. If profile_name is None, falls back to the active
+    /// session, then an interactive picker.
+    fn console_command(&self, profile_name: Option<&str>) -> io::Result<i32> {
+        // Resolve the profile to use: arg → active session → picker.
+        let resolved: Option<String> = match profile_name {
+            Some(n) => Some(n.to_string()),
+            None => match env::var(KEE_CURRENT_PROFILE) {
+                Ok(n) if !n.is_empty() => Some(n),
+                _ => self.pick_profile("Open the console for which profile?")?,
+            },
+        };
+
+        let name = match resolved {
+            Some(n) => n,
+            None => return Ok(0),
+        };
+
+        let config = self.load_config();
+        let profile_info = match config.profiles.get(&name) {
+            Some(p) => p.clone(),
+            None => {
+                eprintln!("\n [!] Profile '{}' not found.", hlt(&name));
+                eprintln!(" Run {} to see available profiles.", hlt("kee ls"));
+                return Ok(1);
+            }
+        };
+        let aws_profile = profile_info.profile_name.clone();
+
+        let _ = self.aws_manager.try_refresh_token(&profile_info);
+        if !self.check_credentials(&aws_profile) {
+            eprintln!(
+                " Kee: session expired for '{}', running 'aws sso login'...",
+                hlt(&aws_profile)
+            );
+            if !self.sso_login(&aws_profile)? || !self.check_credentials(&aws_profile) {
+                eprintln!(
+                    " [X] Failed to authenticate. Please run {} manually.",
+                    hlt("aws sso login")
+                );
+                return Ok(1);
+            }
+        }
+
+        if profile_info.production {
+            println!("\n \x1b[1;31m⚠️  PRODUCTION ACCOUNT\x1b[0m");
+        }
+
+        // Get temp credentials via the AWS CLI. Output is the standard
+        // credential_process JSON shape.
+        let creds_out = Command::new("aws")
+            .args([
+                "configure",
+                "export-credentials",
+                "--profile",
+                &aws_profile,
+                "--format",
+                "process",
+            ])
+            .env(AWS_CLI_AUTO_PROMPT, "off")
+            .env(AWS_PAGER, "")
+            .output()?;
+
+        if !creds_out.status.success() {
+            eprintln!(
+                "\n [X] Could not export credentials for '{}'.\n     {}",
+                hlt(&aws_profile),
+                String::from_utf8_lossy(&creds_out.stderr).trim()
+            );
+            eprintln!(
+                "     Requires AWS CLI v2.15+. Run {} to check.",
+                hlt("aws --version")
+            );
+            return Ok(1);
+        }
+
+        let creds: ExportedCredentials = match serde_json::from_slice(&creds_out.stdout) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("\n [X] Could not parse exported credentials: {e}");
+                return Ok(1);
+            }
+        };
+
+        // Build the federation session payload.
+        let session_token = creds.session_token.unwrap_or_default();
+        let session_json = format!(
+            r#"{{"sessionId":"{}","sessionKey":"{}","sessionToken":"{}"}}"#,
+            creds.access_key_id, creds.secret_access_key, session_token
+        );
+
+        let signin_token = match get_signin_token(&session_json) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("\n [X] Could not get a signin token from AWS: {e}");
+                return Ok(1);
+            }
+        };
+
+        let console_url = console_url_for_region(&profile_info.sso_region);
+        let issuer = build_issuer();
+        let login_url = format!(
+            "https://signin.aws.amazon.com/federation?Action=login&Issuer={}&Destination={}&SigninToken={}",
+            url_encode(&issuer),
+            url_encode(&console_url),
+            url_encode(&signin_token),
+        );
+
+        eprintln!(" Opening AWS console for {}...", hlt(&aws_profile));
+        if let Err(e) = open_in_browser(&login_url) {
+            eprintln!("\n [!] Could not open browser automatically: {e}");
+            eprintln!(" Open this URL manually:\n {login_url}");
+            return Ok(1);
+        }
+
+        Ok(0)
     }
 
     fn current_profile(&self) {
@@ -765,6 +891,111 @@ impl KeeManager {
 
         println!("\n {} — Session ended.", hlt(profile_name));
         Ok(())
+    }
+}
+
+/// Output shape of `aws configure export-credentials --format process`.
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct ExportedCredentials {
+    access_key_id: String,
+    secret_access_key: String,
+    session_token: Option<String>,
+}
+
+/// Response from the federation endpoint when requesting a signin token.
+#[derive(Deserialize)]
+struct SigninTokenResponse {
+    #[serde(rename = "SigninToken")]
+    signin_token: String,
+}
+
+/// Build the Issuer string AWS shows in the federation audit log.
+/// Format: {hostname}/{user}/kee, with fallbacks if either piece is missing.
+fn build_issuer() -> String {
+    let host = Command::new("hostname")
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                String::from_utf8(o.stdout).ok()
+            } else {
+                None
+            }
+        })
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown-host".to_string());
+
+    let user = env::var("USER")
+        .or_else(|_| env::var("USERNAME"))
+        .unwrap_or_else(|_| "unknown-user".to_string());
+
+    format!("{host}/{user}/kee")
+}
+
+/// Hit the AWS federation endpoint to exchange temp credentials for a
+/// short-lived signin token.
+fn get_signin_token(session_json: &str) -> Result<String, String> {
+    let url = format!(
+        "https://signin.aws.amazon.com/federation?Action=getSigninToken&Session={}",
+        url_encode(session_json)
+    );
+
+    let resp: SigninTokenResponse = ureq::get(&url)
+        .timeout(std::time::Duration::from_secs(10))
+        .call()
+        .map_err(|e| e.to_string())?
+        .into_json()
+        .map_err(|e| e.to_string())?;
+
+    Ok(resp.signin_token)
+}
+
+/// Pick the regional console URL. The federation endpoint itself is global,
+/// but the destination URL determines which region the console lands on.
+fn console_url_for_region(region: &str) -> String {
+    if region.is_empty() {
+        "https://console.aws.amazon.com/".to_string()
+    } else {
+        format!("https://{region}.console.aws.amazon.com/")
+    }
+}
+
+/// Minimal RFC 3986 percent-encoding for query-string values. Encodes anything
+/// that isn't an unreserved character.
+fn url_encode(s: &str) -> String {
+    const UNRESERVED: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~";
+    let mut out = String::with_capacity(s.len());
+    for &b in s.as_bytes() {
+        if UNRESERVED.contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// Open a URL in the user's default browser. Uses platform-native commands so
+/// we don't take a dependency on the `open` crate.
+fn open_in_browser(url: &str) -> io::Result<()> {
+    let status = if cfg!(target_os = "macos") {
+        Command::new("open").arg(url).status()?
+    } else if cfg!(target_os = "windows") {
+        Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .status()?
+    } else {
+        Command::new("xdg-open").arg(url).status()?
+    };
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "browser opener exited with status {status}"
+        )))
     }
 }
 
@@ -854,6 +1085,10 @@ fn main() -> io::Result<()> {
             cmd.push("aws".to_string());
             cmd.extend(args);
             let code = kee.run_command(&profile_name, &cmd)?;
+            std::process::exit(code);
+        }
+        Commands::Console { profile_name } => {
+            let code = kee.console_command(profile_name.as_deref())?;
             std::process::exit(code);
         }
     }
