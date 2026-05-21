@@ -761,13 +761,7 @@ impl KeeManager {
             };
 
             let alias_str = alias.unwrap_or_default();
-            let prod_tag = if info.production {
-                " \x1b[1;31m[PROD]\x1b[0m"
-            } else {
-                ""
-            };
-
-            println!(" {}{}{}", hlt(&name), marker, prod_tag);
+            println!(" {}{}", hlt(&name), marker);
             println!("   Status:     {status_line}");
             println!(
                 "   Account:    {}{}",
