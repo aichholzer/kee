@@ -145,9 +145,19 @@ impl AwsManager {
     }
 
     /// Attempt to refresh an expired SSO access token using the cached refresh token.
-    /// Returns true if the token was successfully refreshed, false otherwise.
+    /// Returns true if the token was successfully refreshed (or if another process
+    /// already refreshed it), false only when the token is genuinely dead.
     pub fn try_refresh_token(&self, profile_info: &ProfileInfo) -> bool {
-        self.do_refresh_token(profile_info).is_some()
+        if self.do_refresh_token(profile_info).is_some() {
+            return true;
+        }
+
+        // Refresh failed. Another process (AWS CLI, SDK, SOPS, etc.) may have
+        // already rotated the refresh token, invalidating ours. Re-read the
+        // cache: if the token is still valid, treat it as success.
+        self.read_token_expiry(profile_info)
+            .map(|expires_at| expires_at > chrono::Utc::now())
+            .unwrap_or(false)
     }
 
     fn do_refresh_token(&self, profile_info: &ProfileInfo) -> Option<()> {
