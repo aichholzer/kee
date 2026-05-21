@@ -10,6 +10,7 @@ complete -c kee -n "__fish_use_subcommand" -a "set" -d "Update profile settings"
 complete -c kee -n "__fish_use_subcommand" -a "run" -d "Run a command with a profile (no sub-shell)"
 complete -c kee -n "__fish_use_subcommand" -a "aws" -d "Run an AWS CLI command with a profile"
 complete -c kee -n "__fish_use_subcommand" -a "console" -d "Open the AWS Management Console for a profile"
+complete -c kee -n "__fish_use_subcommand" -a "status" -d "Show detailed status of all profiles"
 
 # Profile names for use, rm, set, run, aws and console commands
 complete -c kee -n "__fish_seen_subcommand_from use rm set run aws console" -a "(kee ls --names 2>/dev/null)"

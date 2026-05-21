@@ -19,6 +19,7 @@ _kee() {
         'run:Run a command with a profile (no sub-shell)'
         'aws:Run an AWS CLI command with a profile'
         'console:Open the AWS Management Console for a profile'
+        'status:Show detailed status of all profiles'
       )
       _describe 'commands' commands
       ;;

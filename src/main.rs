@@ -38,7 +38,7 @@ const AWS_PAGER: &str = "AWS_PAGER";
 #[command(name = "kee")]
 #[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = format!("{KEE_ART}\n V. {}", env!("CARGO_PKG_VERSION")))]
-#[command(long_about = format!("{KEE_ART}\n V. {}\n\nExamples:\n  kee                        Show current profile or this help\n  kee add myprofile          Add a new AWS profile\n  kee use                    Pick a profile interactively (starts sub-shell)\n  kee use myprofile          Use a specific profile (starts sub-shell)\n  kee aws myprofile s3 ls    Run an AWS CLI command with a profile\n  kee run myprofile -- CMD   Run any command with a profile (no sub-shell)\n  kee console                Open the AWS console (current session or picker)\n  kee console myprofile      Open the AWS console for a specific profile\n  kee ls                     List all available profiles\n  kee current                Show current, active profile\n  kee rm                     Pick a profile to remove interactively\n  kee rm myprofile           Remove a specific profile", env!("CARGO_PKG_VERSION")))]
+#[command(long_about = format!("{KEE_ART}\n V. {}\n\nExamples:\n  kee                        Show current profile or this help\n  kee add myprofile          Add a new AWS profile\n  kee use                    Pick a profile interactively (starts sub-shell)\n  kee use myprofile          Use a specific profile (starts sub-shell)\n  kee aws myprofile s3 ls    Run an AWS CLI command with a profile\n  kee run myprofile -- CMD   Run any command with a profile (no sub-shell)\n  kee console                Open the AWS console (current session or picker)\n  kee console myprofile      Open the AWS console for a specific profile\n  kee status                 Show all profiles with session status and expiry\n  kee ls                     List all available profiles\n  kee current                Show current, active profile\n  kee rm                     Pick a profile to remove interactively\n  kee rm myprofile           Remove a specific profile", env!("CARGO_PKG_VERSION")))]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -113,6 +113,8 @@ enum Commands {
         )]
         profile_name: Option<String>,
     },
+    /// Show detailed status of all profiles (sessions, expiry, aliases)
+    Status,
     /// Update profile settings
     Set {
         #[arg(
@@ -696,6 +698,103 @@ impl KeeManager {
         }
     }
 
+    /// Show detailed status of all profiles: account ID, role, alias, token
+    /// expiry, and whether the session is currently valid. Checks run in
+    /// parallel (one thread per profile) to keep latency low.
+    fn status_command(&self) -> io::Result<()> {
+        let config = self.load_config();
+
+        if config.profiles.is_empty() {
+            println!(
+                "\n [!] No profiles configured.\n Run {} to add one.",
+                hlt("kee add PROFILE_NAME")
+            );
+            return Ok(());
+        }
+
+        // Collect profile info for parallel processing.
+        let profiles: Vec<(String, ProfileInfo)> = config
+            .profiles
+            .iter()
+            .map(|(name, info)| (name.clone(), info.clone()))
+            .collect();
+
+        let current = env::var(KEE_CURRENT_PROFILE).ok();
+
+        // Spawn a thread per profile to check status concurrently.
+        let handles: Vec<_> = profiles
+            .into_iter()
+            .map(|(name, info)| {
+                let aws_manager = self.aws_manager.clone();
+                let profile_name = info.profile_name.clone();
+                thread::spawn(move || {
+                    let expiry = aws_manager.read_token_expiry(&info);
+                    let alias = get_account_alias(&profile_name);
+                    let valid = check_credentials_static(&profile_name);
+                    (name, info, expiry, alias, valid)
+                })
+            })
+            .collect();
+
+        println!();
+        for handle in handles {
+            let (name, info, expiry, alias, valid) = handle.join().unwrap();
+
+            let is_current = current.as_deref() == Some(&name);
+            let marker = if is_current { " *" } else { "" };
+
+            // Status indicator
+            let status = if valid {
+                "\x1b[0;32m●\x1b[0m active"
+            } else {
+                "\x1b[0;31m●\x1b[0m expired"
+            };
+
+            // Expiry display
+            let expiry_str = match expiry {
+                Some(exp) => {
+                    let remaining = exp - chrono::Utc::now();
+                    if remaining.num_seconds() <= 0 {
+                        "expired".to_string()
+                    } else if remaining.num_hours() > 0 {
+                        format!(
+                            "{}h {}m remaining",
+                            remaining.num_hours(),
+                            remaining.num_minutes() % 60
+                        )
+                    } else {
+                        format!("{}m remaining", remaining.num_minutes())
+                    }
+                }
+                None => "no token".to_string(),
+            };
+
+            let alias_str = alias.unwrap_or_default();
+            let prod_tag = if info.production {
+                " \x1b[1;31m[PROD]\x1b[0m"
+            } else {
+                ""
+            };
+
+            println!(" {}{}{}", hlt(&name), marker, prod_tag);
+            println!("   Status:     {status}");
+            println!(
+                "   Account:    {}{}",
+                info.sso_account_id,
+                if alias_str.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({alias_str})")
+                }
+            );
+            println!("   Role:       {}", info.sso_role_name);
+            println!("   Token:      {expiry_str}");
+            println!();
+        }
+
+        Ok(())
+    }
+
     /// Open the AWS Management Console in the default browser, federated as
     /// the chosen profile. If profile_name is None, falls back to the active
     /// session, then an interactive picker.
@@ -910,6 +1009,48 @@ struct SigninTokenResponse {
     signin_token: String,
 }
 
+/// Get the account alias for a profile. Returns None if the call fails or
+/// there's no alias set. This is a standalone function so it can be called
+/// from a spawned thread without borrowing KeeManager.
+fn get_account_alias(profile_name: &str) -> Option<String> {
+    let output = Command::new("aws")
+        .args([
+            "iam",
+            "list-account-aliases",
+            "--profile",
+            profile_name,
+            "--output",
+            "json",
+        ])
+        .env("AWS_CLI_AUTO_PROMPT", "off")
+        .env("AWS_PAGER", "")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+
+    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    parsed["AccountAliases"]
+        .as_array()?
+        .first()?
+        .as_str()
+        .map(|s| s.to_string())
+}
+
+/// Check credentials for a profile. Standalone function for use in threads.
+fn check_credentials_static(profile_name: &str) -> bool {
+    Command::new("aws")
+        .args(["sts", "get-caller-identity", "--profile", profile_name])
+        .env("AWS_CLI_AUTO_PROMPT", "off")
+        .env("AWS_PAGER", "")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 /// Build the Issuer string AWS shows in the federation audit log.
 /// Format: {hostname}/{user}/kee, with fallbacks if either piece is missing.
 fn build_issuer() -> String {
@@ -1090,6 +1231,9 @@ fn main() -> io::Result<()> {
         Commands::Console { profile_name } => {
             let code = kee.console_command(profile_name.as_deref())?;
             std::process::exit(code);
+        }
+        Commands::Status => {
+            kee.status_command()?;
         }
     }
 

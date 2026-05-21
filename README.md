@@ -221,6 +221,14 @@ kee ls
 
 Show a quick overview of all configured profiles.
 
+### Show profile status
+
+```bash
+kee status
+```
+
+Show detailed status of all profiles: session health (active/expired), token expiry countdown, account ID, account alias, and role. Checks run in parallel so the output appears quickly even with many profiles.
+
 ### Show current profile
 
 ```bash

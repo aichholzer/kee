@@ -7,7 +7,7 @@ _kee_completion() {
 
   case ${COMP_CWORD} in
     1)
-      opts="add use ls current rm set run aws console help"
+      opts="add use ls current rm set run aws console status help"
       COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
       return 0
       ;;
