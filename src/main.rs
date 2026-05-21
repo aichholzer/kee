@@ -730,43 +730,34 @@ impl KeeManager {
                 thread::spawn(move || {
                     let expiry = aws_manager.read_token_expiry(&info);
                     let alias = get_account_alias(&profile_name);
-                    let valid = check_credentials_static(&profile_name);
-                    (name, info, expiry, alias, valid)
+                    (name, info, expiry, alias)
                 })
             })
             .collect();
 
         println!();
         for handle in handles {
-            let (name, info, expiry, alias, valid) = handle.join().unwrap();
+            let (name, info, expiry, alias) = handle.join().unwrap();
 
             let is_current = current.as_deref() == Some(&name);
             let marker = if is_current { " *" } else { "" };
 
-            // Status indicator
-            let status = if valid {
-                "\x1b[0;32m●\x1b[0m active"
-            } else {
-                "\x1b[0;31m●\x1b[0m expired"
-            };
-
-            // Expiry display
-            let expiry_str = match expiry {
+            // Single status line combining health and expiry.
+            let status_line = match expiry {
                 Some(exp) => {
                     let remaining = exp - chrono::Utc::now();
                     if remaining.num_seconds() <= 0 {
-                        "expired".to_string()
+                        "\x1b[0;31m●\x1b[0m Expired".to_string()
                     } else if remaining.num_hours() > 0 {
-                        format!(
-                            "{}h {}m remaining",
-                            remaining.num_hours(),
-                            remaining.num_minutes() % 60
-                        )
+                        let h = remaining.num_hours();
+                        let m = remaining.num_minutes() % 60;
+                        format!("\x1b[0;32m●\x1b[0m Active ({h} hours, {m} minutes remaining)")
                     } else {
-                        format!("{}m remaining", remaining.num_minutes())
+                        let m = remaining.num_minutes();
+                        format!("\x1b[0;32m●\x1b[0m Active ({m} minutes remaining)")
                     }
                 }
-                None => "no token".to_string(),
+                None => "\x1b[0;31m●\x1b[0m Expired".to_string(),
             };
 
             let alias_str = alias.unwrap_or_default();
@@ -777,7 +768,7 @@ impl KeeManager {
             };
 
             println!(" {}{}{}", hlt(&name), marker, prod_tag);
-            println!("   Status:     {status}");
+            println!("   {status_line}");
             println!(
                 "   Account:    {}{}",
                 info.sso_account_id,
@@ -788,7 +779,6 @@ impl KeeManager {
                 }
             );
             println!("   Role:       {}", info.sso_role_name);
-            println!("   Token:      {expiry_str}");
             println!();
         }
 
@@ -1036,19 +1026,6 @@ fn get_account_alias(profile_name: &str) -> Option<String> {
         .first()?
         .as_str()
         .map(|s| s.to_string())
-}
-
-/// Check credentials for a profile. Standalone function for use in threads.
-fn check_credentials_static(profile_name: &str) -> bool {
-    Command::new("aws")
-        .args(["sts", "get-caller-identity", "--profile", profile_name])
-        .env("AWS_CLI_AUTO_PROMPT", "off")
-        .env("AWS_PAGER", "")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
 }
 
 /// Build the Issuer string AWS shows in the federation audit log.
