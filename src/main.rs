@@ -768,7 +768,7 @@ impl KeeManager {
             };
 
             println!(" {}{}{}", hlt(&name), marker, prod_tag);
-            println!("   {status_line}");
+            println!("   Status:     {status_line}");
             println!(
                 "   Account:    {}{}",
                 info.sso_account_id,
