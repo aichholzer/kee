@@ -50,14 +50,10 @@ jobs:
       - name: Build
         run: cargo build --verbose
 
-      - name: Run unit tests
-        run: cargo test --lib --verbose
-
-      - name: Run integration tests
-        run: cargo test --test integration_tests --verbose
-
-      - name: Run binary tests
-        run: cargo test --test unit_tests --verbose
+      - name: Run tests
+        # Covers lib tests, in-binary #[cfg(test)] modules, and the
+        # cli_tests / unit_tests integration files in tests/.
+        run: cargo test --all-targets --verbose
 
       - name: Test CLI functionality
         run: |

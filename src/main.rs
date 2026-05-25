@@ -186,20 +186,55 @@ fn hlt(text: &str) -> String {
 
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-struct Spinner {
+/// Generic cancellable background thread. Wraps the running flag plus the
+/// JoinHandle and signals/joins on drop. Specialised by Spinner and
+/// SessionRefresher; if a third use shows up, just spawn another.
+struct BackgroundThread {
     running: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
 }
 
-impl Spinner {
-    fn start(message: &str) -> Self {
+impl BackgroundThread {
+    /// Spawn a thread. The closure receives a clone of the running flag and
+    /// is expected to exit when it sees `false`.
+    fn spawn<F>(f: F) -> Self
+    where
+        F: FnOnce(Arc<AtomicBool>) + Send + 'static,
+    {
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = Arc::clone(&running);
-        let message = message.to_string();
+        let handle = thread::spawn(move || f(running_clone));
+        Self {
+            running,
+            handle: Some(handle),
+        }
+    }
 
-        let handle = thread::spawn(move || {
+    /// Signal stop and wait for the thread to exit. Idempotent.
+    fn stop(&mut self) {
+        self.running.store(false, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for BackgroundThread {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+struct Spinner {
+    thread: BackgroundThread,
+}
+
+impl Spinner {
+    fn start(message: &str) -> Self {
+        let message = message.to_string();
+        let thread = BackgroundThread::spawn(move |running| {
             let mut i = 0;
-            while running_clone.load(Ordering::Relaxed) {
+            while running.load(Ordering::Relaxed) {
                 print!(
                     "\r {} {}",
                     SPINNER_FRAMES[i % SPINNER_FRAMES.len()],
@@ -210,19 +245,12 @@ impl Spinner {
                 i += 1;
             }
         });
-
-        Self {
-            running,
-            handle: Some(handle),
-        }
+        Self { thread }
     }
 
     fn stop(mut self, result: &str) {
-        self.running.store(false, Ordering::Relaxed);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
-        // Clear the spinner line and print the result
+        self.thread.stop();
+        // Clear the spinner line and print the result.
         print!("\r\x1b[2K");
         let _ = io::stdout().flush();
         println!("{result}");
@@ -231,10 +259,10 @@ impl Spinner {
 
 impl Drop for Spinner {
     fn drop(&mut self) {
-        self.running.store(false, Ordering::Relaxed);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
+        // Joining is handled by the inner BackgroundThread's Drop. We just
+        // need to clear the spinner line so we don't leave a half-drawn
+        // frame on the terminal if someone forgot to call stop().
+        self.thread.stop();
         print!("\r\x1b[2K");
         let _ = io::stdout().flush();
     }
@@ -247,18 +275,15 @@ const REFRESH_FALLBACK_SECS: u64 = 1800;
 
 /// Background thread that keeps the SSO session fresh while a sub-shell is active.
 struct SessionRefresher {
-    running: Arc<AtomicBool>,
-    handle: Option<thread::JoinHandle<()>>,
+    #[allow(dead_code)]
+    thread: BackgroundThread,
 }
 
 impl SessionRefresher {
     fn start(aws_manager: AwsManager, profile_info: ProfileInfo) -> Self {
-        let running = Arc::new(AtomicBool::new(true));
-        let running_clone = Arc::clone(&running);
-
-        let handle = thread::spawn(move || {
+        let thread = BackgroundThread::spawn(move |running| {
             let mut last_ok = true;
-            while running_clone.load(Ordering::Relaxed) {
+            while running.load(Ordering::Relaxed) {
                 // Decide how long to sleep based on the current token expiry.
                 let sleep_secs = match aws_manager.read_token_expiry(&profile_info) {
                     Some(expires_at) => {
@@ -272,12 +297,12 @@ impl SessionRefresher {
 
                 // Sleep in short ticks so we exit promptly when signalled.
                 let mut slept = 0u64;
-                while slept < sleep_secs && running_clone.load(Ordering::Relaxed) {
+                while slept < sleep_secs && running.load(Ordering::Relaxed) {
                     thread::sleep(Duration::from_secs(1));
                     slept += 1;
                 }
 
-                if !running_clone.load(Ordering::Relaxed) {
+                if !running.load(Ordering::Relaxed) {
                     break;
                 }
 
@@ -311,32 +336,30 @@ impl SessionRefresher {
                 last_ok = ok;
             }
         });
-
-        Self {
-            running,
-            handle: Some(handle),
-        }
-    }
-}
-
-impl Drop for SessionRefresher {
-    fn drop(&mut self) {
-        self.running.store(false, Ordering::Relaxed);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
+        Self { thread }
     }
 }
 
 impl KeeManager {
     fn prompt_user(&self, message: &str) -> io::Result<bool> {
-        print!("{message}");
-        io::stdout().flush()?;
-
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-
-        Ok(input.trim().to_lowercase() == "y")
+        // In an interactive terminal, use dialoguer for visual consistency
+        // with the fuzzy profile picker. When stdin isn't a TTY (piped input
+        // from scripts or tests), dialoguer errors with "not a terminal" so
+        // we fall back to a plain stdin read that the caller can drive.
+        if std::io::IsTerminal::is_terminal(&io::stdin()) {
+            dialoguer::Confirm::with_theme(&dialoguer::theme::ColorfulTheme::default())
+                .with_prompt(message)
+                .default(false)
+                .interact_opt()
+                .map(|opt| opt.unwrap_or(false))
+                .map_err(io::Error::other)
+        } else {
+            print!(" {message} (y/N): ");
+            io::stdout().flush()?;
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            Ok(input.trim().eq_ignore_ascii_case("y"))
+        }
     }
 
     /// Show a fuzzy picker over configured profiles. Returns the chosen profile
@@ -466,10 +489,8 @@ impl KeeManager {
         let mut config = self.load_config();
 
         // Ask if this is a production account
-        let production = self.prompt_user(&format!(
-            "\n Is {} a production account? (y/N): ",
-            hlt(profile_name)
-        ))?;
+        let production =
+            self.prompt_user(&format!("Is {} a production account?", hlt(profile_name)))?;
         let mut profile_info = profile_info;
         profile_info.production = production;
 
@@ -533,7 +554,7 @@ impl KeeManager {
 
         // Confirm removal
         if !self.prompt_user(&format!(
-            "\n [!] Are you sure you want to remove profile '{}'? (y/N): ",
+            "Are you sure you want to remove profile '{}'?",
             hlt(profile_name)
         ))? {
             return Ok(false);
@@ -634,10 +655,10 @@ impl KeeManager {
             }
 
             // Offer to add the profile
-            if self.prompt_user(" Would you like to add now? (y/N): ")? {
+            if self.prompt_user("Would you like to add now?")? {
                 if self.add_profile(profile_name)? {
                     if self.prompt_user(&format!(
-                        " Would you like to use profile '{hlt_profile}' now? (y/N): "
+                        "Would you like to use profile '{hlt_profile}' now?"
                     ))? {
                         // Reload config
                         config = self.load_config();
@@ -1040,11 +1061,13 @@ impl KeeManager {
             env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
         };
 
-        // Show banner
-        if profile_info.production {
-            println!("\n \x1b[1;31m⚠️  PRODUCTION ACCOUNT\x1b[0m");
-        }
+        // Show banner. Production warning sits between the profile name
+        // and the start message so the warning is visually anchored to the
+        // profile it applies to.
         println!("\n Profile: {}", hlt(profile_name));
+        if profile_info.production {
+            println!(" \x1b[1;31m⚠️  PRODUCTION ACCOUNT\x1b[0m");
+        }
         println!(" {} is starting a sub-shell...", hlt("Kee"));
         println!(" Type {} to return to your main shell.", hlt("exit"));
 
@@ -1888,6 +1911,65 @@ mod tests {
         // Host and user portions must be non-empty (fallbacks kick in if needed).
         assert!(!parts[0].is_empty());
         assert!(!parts[1].is_empty());
+    }
+
+    // -- BackgroundThread -----------------------------------------------------
+
+    #[test]
+    fn background_thread_runs_to_completion_when_signalled_to_stop() {
+        use std::sync::atomic::AtomicUsize;
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = Arc::clone(&counter);
+
+        let mut bg = BackgroundThread::spawn(move |running| {
+            while running.load(Ordering::Relaxed) {
+                counter_clone.fetch_add(1, Ordering::Relaxed);
+                thread::sleep(Duration::from_millis(5));
+            }
+        });
+
+        // Let it tick a few times, then stop.
+        thread::sleep(Duration::from_millis(50));
+        bg.stop();
+
+        // The counter incremented at least once and the thread joined cleanly.
+        assert!(counter.load(Ordering::Relaxed) > 0);
+    }
+
+    #[test]
+    fn background_thread_drop_signals_and_joins() {
+        // If we don't call stop() explicitly, drop() should do it for us.
+        // Otherwise the test would hang.
+        use std::sync::atomic::AtomicBool;
+        let exited = Arc::new(AtomicBool::new(false));
+        let exited_clone = Arc::clone(&exited);
+
+        {
+            let _bg = BackgroundThread::spawn(move |running| {
+                while running.load(Ordering::Relaxed) {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                exited_clone.store(true, Ordering::Relaxed);
+            });
+            thread::sleep(Duration::from_millis(20));
+        } // _bg dropped here; should signal stop and join.
+
+        assert!(
+            exited.load(Ordering::Relaxed),
+            "thread should have observed stop and exited"
+        );
+    }
+
+    #[test]
+    fn background_thread_stop_is_idempotent() {
+        let mut bg = BackgroundThread::spawn(|running| {
+            while running.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(5));
+            }
+        });
+
+        bg.stop();
+        bg.stop(); // Should not panic; second call is a no-op.
     }
 
     // -- install_target -------------------------------------------------------

@@ -808,4 +808,71 @@ esac
             .success()
             .stdout(contains("PRODUCTION ACCOUNT"));
     }
+
+    // --- --verbose flag -----------------------------------------------------
+
+    #[test]
+    fn verbose_flag_accepted_as_global() {
+        // Both before and after the subcommand should work because of
+        // `global = true` on the flag.
+        let tmp = TempDir::new().unwrap();
+        let stub = aws_stub_dir(STUB_DEFAULT);
+
+        kee_with_stub(tmp.path(), &stub)
+            .arg("--verbose")
+            .arg("ls")
+            .assert()
+            .success();
+
+        kee_with_stub(tmp.path(), &stub)
+            .arg("ls")
+            .arg("--verbose")
+            .assert()
+            .success();
+    }
+
+    #[test]
+    fn verbose_flag_short_form_works() {
+        let tmp = TempDir::new().unwrap();
+        let stub = aws_stub_dir(STUB_DEFAULT);
+
+        kee_with_stub(tmp.path(), &stub)
+            .args(["-v", "ls"])
+            .assert()
+            .success();
+    }
+
+    #[test]
+    fn verbose_emits_diagnostic_when_aws_fails() {
+        // With --verbose and the STS-fails stub, the AWS CLI's stderr should
+        // be surfaced. The default stub for `kee aws` would normally swallow
+        // the `aws sts get-caller-identity` stderr.
+        let stub_body = r#"#!/bin/sh
+case "$1" in
+    sts) echo "kee-test: sts failed loudly" >&2; exit 255 ;;
+    sso) exit 0 ;;
+    *) exit 1 ;;
+esac
+"#;
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        seed_config(home, &fixture_config());
+
+        let stub = aws_stub_dir(stub_body);
+        let output = kee_with_stub(home, &stub)
+            .args(["--verbose", "aws", "acme.dev", "s3", "ls"])
+            .output()
+            .unwrap();
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // The vlog! macro prefixes diagnostic lines with " [v] ".
+        assert!(
+            stderr.contains("[v]"),
+            "expected verbose diagnostic in stderr, got: {stderr}"
+        );
+        assert!(
+            stderr.contains("kee-test: sts failed loudly"),
+            "expected aws stderr to be surfaced under --verbose, got: {stderr}"
+        );
+    }
 }
