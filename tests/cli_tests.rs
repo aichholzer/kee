@@ -4,9 +4,14 @@
 //! with a fresh `HOME` pointing at a tempdir. No global state leaks between
 //! tests, so they can run in parallel.
 //!
-//! Tests for commands that shell out to `aws` (`kee add`, `kee status`,
-//! `kee aws`, `kee run`, `kee console`) are out of scope here; they need a
-//! child-env-aware AWS shim and are tracked separately.
+//! Tests that need to mock the `aws` CLI use `aws_stub_dir()` to create a
+//! tempdir containing an executable `aws` shell script, then prepend that
+//! dir to the child's `PATH` via `Command::env`. This is child-env-aware
+//! and parallel-safe (each test owns its own stub).
+//!
+//! Coverage for `kee console` is intentionally excluded: it hits the AWS
+//! federation endpoint over HTTPS, which would need an HTTP mock server
+//! to test cleanly. Tracked separately.
 
 use assert_cmd::Command;
 use kee::{KeeConfig, ProfileInfo};
@@ -71,6 +76,38 @@ fn kee(home: &Path) -> Command {
     cmd.env("HOME", home)
         .env_remove("KEE_ACTIVE_PROFILE")
         .env_remove("KEE_CURRENT_PROFILE");
+    cmd
+}
+
+/// Create a tempdir containing an executable `aws` script that dispatches
+/// based on its first argument. The stub body is a single shell script:
+///
+/// ```sh
+/// #!/bin/sh
+/// case "$1" in ... esac
+/// ```
+///
+/// Returns the tempdir; the caller wires it into PATH on the child.
+#[cfg(unix)]
+fn aws_stub_dir(stub_body: &str) -> TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = TempDir::new().unwrap();
+    let stub = tmp.path().join("aws");
+    fs::write(&stub, stub_body).unwrap();
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+    tmp
+}
+
+/// Build a `kee` Command with HOME, cleared KEE_* env, and a tempdir
+/// prepended to PATH that contains the given AWS stub.
+#[cfg(unix)]
+fn kee_with_stub(home: &Path, stub: &TempDir) -> Command {
+    let mut cmd = kee(home);
+    let parent_path = std::env::var("PATH").unwrap_or_default();
+    cmd.env(
+        "PATH",
+        format!("{}:{}", stub.path().display(), parent_path),
+    );
     cmd
 }
 
@@ -160,10 +197,7 @@ fn ls_names_with_no_profiles_is_silent() {
     // `kee ls --names` is meant for scripting; empty configs should produce
     // no output rather than the help text.
     let tmp = TempDir::new().unwrap();
-    let output = kee(tmp.path())
-        .args(["ls", "--names"])
-        .output()
-        .unwrap();
+    let output = kee(tmp.path()).args(["ls", "--names"]).output().unwrap();
     assert!(output.status.success());
     assert!(
         String::from_utf8_lossy(&output.stdout).trim().is_empty(),
@@ -443,4 +477,338 @@ fn completions_print_emits_script_to_stdout() {
     let body = std::str::from_utf8(&output.stdout).unwrap();
     assert!(body.contains("compdef kee"));
     assert!(body.contains("_kee_profiles"));
+}
+
+// =============================================================================
+// AWS-shelling commands (#[cfg(unix)] — the stub is a POSIX shell script)
+// =============================================================================
+
+#[cfg(unix)]
+mod aws_shelling {
+    use super::*;
+
+    /// Pre-seed `~/.aws/config` with a working SSO profile so `kee add`
+    /// has something to read after `aws configure sso` "succeeds".
+    fn seed_aws_config(home: &Path, profile_name: &str) {
+        let aws_dir = home.join(".aws");
+        fs::create_dir_all(&aws_dir).unwrap();
+        let body = format!(
+            "[profile {profile_name}]\n\
+             sso_session = acme\n\
+             sso_account_id = 123456789012\n\
+             sso_role_name = Developer\n\
+             output = json\n\
+             \n\
+             [sso-session acme]\n\
+             sso_region = ap-southeast-2\n\
+             sso_start_url = https://acme.awsapps.com/start\n\
+             sso_registration_scopes = sso:account:access\n"
+        );
+        fs::write(aws_dir.join("config"), body).unwrap();
+    }
+
+    /// Default stub: `sts get-caller-identity` succeeds, `iam list-account-aliases`
+    /// returns a known alias, anything else exits 0 silently. Used by tests
+    /// that just need preflight to pass.
+    const STUB_DEFAULT: &str = r#"#!/bin/sh
+case "$1" in
+    sts)
+        # get-caller-identity
+        exit 0
+        ;;
+    iam)
+        # list-account-aliases
+        echo '{"AccountAliases":["acme-prod"]}'
+        exit 0
+        ;;
+    sso-oidc)
+        # No cache to refresh in tests; pretend it failed silently.
+        exit 1
+        ;;
+    sso)
+        # sso login: succeed without doing anything.
+        exit 0
+        ;;
+    configure)
+        # `configure sso` (kee add) or `configure export-credentials`.
+        # `kee add` pre-seeds ~/.aws/config in the test; we just succeed.
+        # `export-credentials` would need a JSON response, but kee console
+        # is excluded from these tests.
+        exit 0
+        ;;
+    *)
+        # Pass-through commands invoked by `kee run` / `kee aws`. Echo args
+        # so tests can assert on stdout.
+        echo "stub-aws-output: $*"
+        exit 0
+        ;;
+esac
+"#;
+
+    /// Stub that fails the preflight `sts get-caller-identity` so we can
+    /// verify the SSO-login fallback path.
+    const STUB_STS_FAILS: &str = r#"#!/bin/sh
+case "$1" in
+    sts) exit 255 ;;
+    sso) exit 0 ;;
+    *) exit 1 ;;
+esac
+"#;
+
+    // --- kee add --------------------------------------------------------------
+
+    #[test]
+    fn add_writes_profile_to_kee_config_and_marks_production_when_y() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        seed_aws_config(home, "acme.dev");
+
+        let stub = aws_stub_dir(STUB_DEFAULT);
+        kee_with_stub(home, &stub)
+            .arg("add")
+            .arg("acme.dev")
+            .write_stdin("y\n")
+            .assert()
+            .success()
+            .stdout(contains("working").or(contains("added")));
+
+        let cfg = read_config(home);
+        let profile = &cfg.profiles["acme.dev"];
+        assert_eq!(profile.profile_name, "acme.dev");
+        assert_eq!(profile.sso_account_id, "123456789012");
+        assert_eq!(profile.sso_role_name, "Developer");
+        assert_eq!(profile.sso_region, "ap-southeast-2");
+        assert!(profile.production, "y answer should set production=true");
+    }
+
+    #[test]
+    fn add_marks_non_production_when_n() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        seed_aws_config(home, "acme.dev");
+
+        let stub = aws_stub_dir(STUB_DEFAULT);
+        kee_with_stub(home, &stub)
+            .arg("add")
+            .arg("acme.dev")
+            .write_stdin("n\n")
+            .assert()
+            .success();
+
+        let cfg = read_config(home);
+        assert!(!cfg.profiles["acme.dev"].production);
+    }
+
+    // --- kee status -----------------------------------------------------------
+
+    #[test]
+    fn status_renders_per_profile_rows_with_alias() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        seed_config(home, &fixture_config());
+
+        let stub = aws_stub_dir(STUB_DEFAULT);
+        kee_with_stub(home, &stub)
+            .arg("status")
+            .assert()
+            .success()
+            .stdout(contains("acme.dev"))
+            .stdout(contains("acme.prod"))
+            .stdout(contains("123456789012"))
+            .stdout(contains("999999999999"))
+            .stdout(contains("Developer"))
+            .stdout(contains("Admin"))
+            // Token expiry can't be read in tests (no cache file); rows
+            // should still render with an Expired status.
+            .stdout(contains("Expired"));
+    }
+
+    #[test]
+    fn status_handles_alias_lookup_failure_gracefully() {
+        // Stub fails the iam call; status should still print the rows
+        // without an alias next to the account ID.
+        let stub_body = r#"#!/bin/sh
+case "$1" in
+    iam) exit 1 ;;
+    *)   exit 0 ;;
+esac
+"#;
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        seed_config(home, &fixture_config());
+
+        let stub = aws_stub_dir(stub_body);
+        kee_with_stub(home, &stub)
+            .arg("status")
+            .assert()
+            .success()
+            .stdout(contains("acme.dev"))
+            .stdout(contains("123456789012"));
+    }
+
+    #[test]
+    fn status_with_no_profiles_shows_help() {
+        let tmp = TempDir::new().unwrap();
+        let stub = aws_stub_dir(STUB_DEFAULT);
+        kee_with_stub(tmp.path(), &stub)
+            .arg("status")
+            .assert()
+            .success()
+            .stdout(contains("No profiles configured"));
+    }
+
+    // --- kee aws --------------------------------------------------------------
+
+    #[test]
+    fn aws_passthrough_runs_command_and_propagates_stdout() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        seed_config(home, &fixture_config());
+
+        let stub = aws_stub_dir(STUB_DEFAULT);
+        kee_with_stub(home, &stub)
+            .arg("aws")
+            .arg("acme.dev")
+            .arg("s3")
+            .arg("ls")
+            .assert()
+            .success()
+            // Default stub echoes any unrecognised top-level command; we
+            // expect "s3 ls" to land in stdout from the wrapped invocation.
+            .stdout(contains("stub-aws-output"))
+            .stdout(contains("s3 ls"));
+    }
+
+    #[test]
+    fn aws_unknown_profile_exits_with_error_code() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        seed_config(home, &fixture_config());
+
+        let stub = aws_stub_dir(STUB_DEFAULT);
+        kee_with_stub(home, &stub)
+            .arg("aws")
+            .arg("ghost")
+            .arg("s3")
+            .arg("ls")
+            .assert()
+            .failure()
+            .stderr(contains("not found"));
+    }
+
+    #[test]
+    fn aws_falls_back_to_sso_login_when_preflight_fails() {
+        // sts fails -> kee runs `aws sso login`, which in our stub also
+        // succeeds. Then sts is called again. We can't easily distinguish
+        // the second sts call here, so we stub it to keep failing and
+        // verify kee surfaces a clear authentication failure.
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        seed_config(home, &fixture_config());
+
+        let stub = aws_stub_dir(STUB_STS_FAILS);
+        kee_with_stub(home, &stub)
+            .arg("aws")
+            .arg("acme.dev")
+            .arg("s3")
+            .arg("ls")
+            .assert()
+            .failure()
+            .stderr(contains("Failed to authenticate"));
+    }
+
+    // --- kee run --------------------------------------------------------------
+
+    #[test]
+    fn run_wraps_arbitrary_command_with_aws_profile_env() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        seed_config(home, &fixture_config());
+
+        let stub = aws_stub_dir(STUB_DEFAULT);
+        // Use /bin/sh -c so we can check $AWS_PROFILE inside the wrapped
+        // command. Stdout from the wrapped command should pass through
+        // cleanly.
+        kee_with_stub(home, &stub)
+            .arg("run")
+            .arg("acme.dev")
+            .arg("--")
+            .arg("/bin/sh")
+            .arg("-c")
+            .arg("echo aws=$AWS_PROFILE kee=$KEE_CURRENT_PROFILE active=$KEE_ACTIVE_PROFILE")
+            .assert()
+            .success()
+            .stdout(contains("aws=acme.dev"))
+            .stdout(contains("kee=acme.dev"))
+            .stdout(contains("active=1"));
+    }
+
+    #[test]
+    fn run_propagates_wrapped_command_exit_code() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        seed_config(home, &fixture_config());
+
+        let stub = aws_stub_dir(STUB_DEFAULT);
+        kee_with_stub(home, &stub)
+            .arg("run")
+            .arg("acme.dev")
+            .arg("--")
+            .arg("/bin/sh")
+            .arg("-c")
+            .arg("exit 42")
+            .assert()
+            .code(42);
+    }
+
+    #[test]
+    fn run_with_empty_command_returns_usage_error() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        seed_config(home, &fixture_config());
+
+        let stub = aws_stub_dir(STUB_DEFAULT);
+        kee_with_stub(home, &stub)
+            .arg("run")
+            .arg("acme.dev")
+            .assert()
+            .code(2)
+            .stderr(contains("specify a command"));
+    }
+
+    #[test]
+    fn run_unknown_profile_exits_with_error() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        seed_config(home, &fixture_config());
+
+        let stub = aws_stub_dir(STUB_DEFAULT);
+        kee_with_stub(home, &stub)
+            .arg("run")
+            .arg("ghost")
+            .arg("--")
+            .arg("/bin/true")
+            .assert()
+            .failure()
+            .stderr(contains("not found"));
+    }
+
+    // --- production banner ---------------------------------------------------
+
+    #[test]
+    fn aws_command_shows_production_warning_for_prod_profile() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        seed_config(home, &fixture_config());
+
+        let stub = aws_stub_dir(STUB_DEFAULT);
+        kee_with_stub(home, &stub)
+            .arg("aws")
+            .arg("acme.prod")
+            .arg("s3")
+            .arg("ls")
+            .assert()
+            .success()
+            .stdout(contains("PRODUCTION ACCOUNT"));
+    }
 }
