@@ -6,3 +6,4 @@ Cargo.lock
 .checkov/
 .grype/
 .semgrep/
+.kiro/
