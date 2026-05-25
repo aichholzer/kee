@@ -2,3 +2,7 @@
 Cargo.lock
 
 .DS_Store
+# Security scanner output (Checkov, Grype, Semgrep)
+.checkov/
+.grype/
+.semgrep/
