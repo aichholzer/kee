@@ -648,51 +648,24 @@ impl KeeManager {
             return Ok(2);
         }
 
-        let config = self.load_config();
-        let profile_info = match config.profiles.get(profile_name) {
-            Some(p) => p.clone(),
-            None => {
-                eprintln!("\n [!] Profile '{}' not found.", hlt(profile_name));
-                eprintln!(" Run {} to see available profiles.", hlt("kee ls"));
-                return Ok(1);
-            }
+        let profile_info = match self.ensure_session(profile_name)? {
+            Some(p) => p,
+            None => return Ok(1),
         };
-        let aws_profile = profile_info.profile_name.clone();
-
-        // Ensure credentials are usable. Try a refresh, then validate, then
-        // fall back to interactive sso login. All status to stderr so we don't
-        // contaminate the wrapped command's stdout.
-        let _ = self.aws_manager.try_refresh_token(&profile_info);
-        if !self.check_credentials(&aws_profile) {
-            eprintln!(
-                " Kee: session expired for '{}', running 'aws sso login'...",
-                hlt(&aws_profile)
-            );
-            if !self.sso_login(&aws_profile)? || !self.check_credentials(&aws_profile) {
-                eprintln!(
-                    " [X] Failed to authenticate. Please run {} manually.",
-                    hlt("aws sso login")
-                );
-                return Ok(1);
-            }
-        }
-
-        if profile_info.production {
-            println!("\n \x1b[1;31m⚠️  PRODUCTION ACCOUNT\x1b[0m");
-        }
+        let aws_profile = &profile_info.profile_name;
 
         let (program, args) = cmd.split_first().unwrap();
         let status = Command::new(program)
             .args(args)
-            .env(AWS_PROFILE, &aws_profile)
-            .env(KEE_CURRENT_PROFILE, &aws_profile)
+            .env(AWS_PROFILE, aws_profile)
+            .env(KEE_CURRENT_PROFILE, aws_profile)
             .env(KEE_ACTIVE_PROFILE, "1")
             .status();
 
         match status {
             Ok(s) => Ok(s.code().unwrap_or(1)),
             Err(e) => {
-                eprintln!(" [X] Failed to execute '{}': {}", program, e);
+                eprintln!(" [X] Failed to execute '{program}': {e}");
                 Ok(127)
             }
         }
@@ -797,35 +770,11 @@ impl KeeManager {
             None => return Ok(0),
         };
 
-        let config = self.load_config();
-        let profile_info = match config.profiles.get(&name) {
-            Some(p) => p.clone(),
-            None => {
-                eprintln!("\n [!] Profile '{}' not found.", hlt(&name));
-                eprintln!(" Run {} to see available profiles.", hlt("kee ls"));
-                return Ok(1);
-            }
+        let profile_info = match self.ensure_session(&name)? {
+            Some(p) => p,
+            None => return Ok(1),
         };
-        let aws_profile = profile_info.profile_name.clone();
-
-        let _ = self.aws_manager.try_refresh_token(&profile_info);
-        if !self.check_credentials(&aws_profile) {
-            eprintln!(
-                " Kee: session expired for '{}', running 'aws sso login'...",
-                hlt(&aws_profile)
-            );
-            if !self.sso_login(&aws_profile)? || !self.check_credentials(&aws_profile) {
-                eprintln!(
-                    " [X] Failed to authenticate. Please run {} manually.",
-                    hlt("aws sso login")
-                );
-                return Ok(1);
-            }
-        }
-
-        if profile_info.production {
-            println!("\n \x1b[1;31m⚠️  PRODUCTION ACCOUNT\x1b[0m");
-        }
+        let aws_profile = &profile_info.profile_name;
 
         // Get temp credentials via the AWS CLI. Output is the standard
         // credential_process JSON shape.
@@ -834,7 +783,7 @@ impl KeeManager {
                 "configure",
                 "export-credentials",
                 "--profile",
-                &aws_profile,
+                aws_profile,
                 "--format",
                 "process",
             ])
@@ -845,7 +794,7 @@ impl KeeManager {
         if !creds_out.status.success() {
             eprintln!(
                 "\n [X] Could not export credentials for '{}'.\n     {}",
-                hlt(&aws_profile),
+                hlt(aws_profile),
                 String::from_utf8_lossy(&creds_out.stderr).trim()
             );
             eprintln!(
@@ -887,7 +836,7 @@ impl KeeManager {
             url_encode(&signin_token),
         );
 
-        eprintln!(" Opening AWS console for {}...", hlt(&aws_profile));
+        eprintln!(" Opening AWS console for {}...", hlt(aws_profile));
         if let Err(e) = open_in_browser(&login_url) {
             eprintln!("\n [!] Could not open browser automatically: {e}");
             eprintln!(" Open this URL manually:\n {login_url}");
@@ -909,6 +858,50 @@ impl KeeManager {
                 None => println!("\n [!] No profile is currently active."),
             }
         }
+    }
+
+    /// Resolve a profile and ensure its SSO session is usable for non-interactive
+    /// commands (run, aws, console). Returns the profile info on success.
+    ///
+    /// Returns `Ok(None)` if the profile doesn't exist or authentication failed —
+    /// in that case the caller has already had a user-facing message printed and
+    /// should just return the appropriate error code.
+    ///
+    /// Status messages go to stderr so they don't contaminate the wrapped
+    /// command's stdout.
+    fn ensure_session(&self, profile_name: &str) -> io::Result<Option<ProfileInfo>> {
+        let config = self.load_config();
+        let profile_info = match config.profiles.get(profile_name) {
+            Some(p) => p.clone(),
+            None => {
+                eprintln!("\n [!] Profile '{}' not found.", hlt(profile_name));
+                eprintln!(" Run {} to see available profiles.", hlt("kee ls"));
+                return Ok(None);
+            }
+        };
+        let aws_profile = &profile_info.profile_name;
+
+        // Try a refresh, then validate, then fall back to interactive sso login.
+        let _ = self.aws_manager.try_refresh_token(&profile_info);
+        if !self.check_credentials(aws_profile) {
+            eprintln!(
+                " Kee: session expired for '{}', running 'aws sso login'...",
+                hlt(aws_profile)
+            );
+            if !self.sso_login(aws_profile)? || !self.check_credentials(aws_profile) {
+                eprintln!(
+                    " [X] Failed to authenticate. Please run {} manually.",
+                    hlt("aws sso login")
+                );
+                return Ok(None);
+            }
+        }
+
+        if profile_info.production {
+            println!("\n \x1b[1;31m⚠️  PRODUCTION ACCOUNT\x1b[0m");
+        }
+
+        Ok(Some(profile_info))
     }
 
     fn check_credentials(&self, profile_name: &str) -> bool {
