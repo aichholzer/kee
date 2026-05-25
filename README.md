@@ -40,7 +40,7 @@ A simple tool to help you manage multiple AWS profiles, with SSO support and eas
 
 ### Prerequisites
 
-- Rust 1.80+ (install from [rustup.rs](https://rustup.rs/)) (On Mac with brew: `brew install rust`)
+- Rust 1.86+ (install from [rustup.rs](https://rustup.rs/)) (On Mac with brew: `brew install rust`)
 - AWS CLI v2 installed and configured
 - Configured AWS SSO account access
 

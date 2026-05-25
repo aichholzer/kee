@@ -2,7 +2,7 @@
 name = "kee"
 version = "1.4.1"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.86"
 description = "AWS CLI profile manager"
 authors = ["Stefan Aichholzer <theaichholzer@gmail.com>"]
 license = "MIT"
