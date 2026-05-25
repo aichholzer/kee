@@ -104,10 +104,7 @@ fn aws_stub_dir(stub_body: &str) -> TempDir {
 fn kee_with_stub(home: &Path, stub: &TempDir) -> Command {
     let mut cmd = kee(home);
     let parent_path = std::env::var("PATH").unwrap_or_default();
-    cmd.env(
-        "PATH",
-        format!("{}:{}", stub.path().display(), parent_path),
-    );
+    cmd.env("PATH", format!("{}:{}", stub.path().display(), parent_path));
     cmd
 }
 
