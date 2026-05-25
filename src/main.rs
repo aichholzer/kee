@@ -1643,3 +1643,173 @@ fn main() -> io::Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- url_encode -----------------------------------------------------------
+
+    #[test]
+    fn url_encode_empty() {
+        assert_eq!(url_encode(""), "");
+    }
+
+    #[test]
+    fn url_encode_unreserved_passes_through() {
+        assert_eq!(
+            url_encode("ABCabc012-_.~"),
+            "ABCabc012-_.~",
+            "RFC 3986 unreserved characters should not be encoded"
+        );
+    }
+
+    #[test]
+    fn url_encode_reserved_is_percent_encoded() {
+        assert_eq!(url_encode("="), "%3D");
+        assert_eq!(url_encode("&"), "%26");
+        assert_eq!(url_encode("?"), "%3F");
+        assert_eq!(url_encode("/"), "%2F");
+        assert_eq!(url_encode(" "), "%20");
+    }
+
+    #[test]
+    fn url_encode_multi_byte_utf8() {
+        // "é" is 0xC3 0xA9 in UTF-8.
+        assert_eq!(url_encode("é"), "%C3%A9");
+    }
+
+    #[test]
+    fn url_encode_realistic_session_payload() {
+        // The federation flow encodes a JSON blob; verify a representative
+        // sample round-trips into the expected shape (key chars encoded,
+        // structure preserved).
+        let input = r#"{"sessionId":"AKIA","sessionKey":"secret"}"#;
+        let out = url_encode(input);
+        assert!(out.starts_with("%7B%22sessionId%22"));
+        assert!(out.ends_with("%22secret%22%7D"));
+    }
+
+    // -- console_url_for_region -----------------------------------------------
+
+    #[test]
+    fn console_url_default_for_empty_region() {
+        assert_eq!(console_url_for_region(""), "https://console.aws.amazon.com/");
+    }
+
+    #[test]
+    fn console_url_includes_region() {
+        assert_eq!(
+            console_url_for_region("ap-southeast-2"),
+            "https://ap-southeast-2.console.aws.amazon.com/"
+        );
+    }
+
+    #[test]
+    fn console_url_passes_region_through() {
+        // No validation on the region string; the input is whatever's in
+        // the AWS config.
+        assert_eq!(
+            console_url_for_region("us-gov-west-1"),
+            "https://us-gov-west-1.console.aws.amazon.com/"
+        );
+    }
+
+    // -- dynamic_completion_snippet -------------------------------------------
+
+    #[test]
+    fn snippet_zsh_has_helper_function() {
+        let s = dynamic_completion_snippet(Shell::Zsh);
+        assert!(s.contains("_kee_profiles"));
+        assert!(s.contains("kee ls --names"));
+    }
+
+    #[test]
+    fn snippet_bash_wraps_clap_completer() {
+        let s = dynamic_completion_snippet(Shell::Bash);
+        assert!(s.contains("_kee_with_profiles"));
+        assert!(s.contains("complete -F _kee_with_profiles"));
+        // Falls through to the clap-generated `_kee` for non-profile args.
+        assert!(s.contains("_kee\n"));
+    }
+
+    #[test]
+    fn snippet_fish_uses_subcommand_filter() {
+        let s = dynamic_completion_snippet(Shell::Fish);
+        assert!(s.contains("__kee_profiles"));
+        assert!(s.contains("__fish_seen_subcommand_from use rm set run aws console"));
+    }
+
+    #[test]
+    fn snippet_powershell_is_empty() {
+        // No installer for PowerShell/Elvish; clap_complete output stands alone.
+        assert_eq!(dynamic_completion_snippet(Shell::PowerShell), "");
+        assert_eq!(dynamic_completion_snippet(Shell::Elvish), "");
+    }
+
+    // -- patch_zsh_profile_completion -----------------------------------------
+
+    #[test]
+    fn patch_swaps_existing_profile_arguments() {
+        let input = "':profile_name -- Name of the AWS profile to use:_default'\n".to_string();
+        let out = patch_zsh_profile_completion(input);
+        assert!(out.contains(":_kee_profiles"));
+        assert!(!out.contains(":_default"));
+    }
+
+    #[test]
+    fn patch_leaves_kee_add_alone() {
+        // `kee add` takes a *new* name; we don't suggest existing profiles.
+        let input = "':profile_name -- Name for the new AWS profile:_default'\n".to_string();
+        let out = patch_zsh_profile_completion(input);
+        assert!(out.contains(":_default"));
+        assert!(!out.contains(":_kee_profiles"));
+    }
+
+    #[test]
+    fn patch_leaves_trailing_args_completer_alone() {
+        // `kee run` and `kee aws` take arbitrary trailing args; their
+        // `cmd`/`args` completers must stay on `:_default`.
+        let input = "'*::cmd -- Command and arguments to run (use -- before flags):_default'\n"
+            .to_string();
+        let out = patch_zsh_profile_completion(input);
+        assert!(out.contains(":_default"));
+        assert!(!out.contains(":_kee_profiles"));
+    }
+
+    #[test]
+    fn patch_handles_mixed_input() {
+        // The realistic case: clap emits all three kinds in one script.
+        let input = "\
+':profile_name -- Name for the new AWS profile:_default' \\
+'::profile_name -- Name of the AWS profile to use (interactive picker if omitted):_default' \\
+'*::cmd -- Command and arguments to run (use -- before flags):_default' \\
+':profile_name -- Name of the AWS profile to update:_default' \\
+"
+        .to_string();
+        let out = patch_zsh_profile_completion(input);
+
+        // kee add line: still :_default.
+        assert!(out.contains("Name for the new AWS profile:_default"));
+        // kee use line: now :_kee_profiles.
+        assert!(out.contains("Name of the AWS profile to use (interactive picker if omitted):_kee_profiles"));
+        // cmd/args line: still :_default.
+        assert!(out.contains("Command and arguments to run (use -- before flags):_default"));
+        // kee set line: now :_kee_profiles.
+        assert!(out.contains("Name of the AWS profile to update:_kee_profiles"));
+    }
+
+    // -- build_issuer ---------------------------------------------------------
+
+    #[test]
+    fn build_issuer_has_kee_suffix_and_slash_structure() {
+        let issuer = build_issuer();
+        // Format: {host}/{user}/kee — three parts separated by `/`.
+        let parts: Vec<&str> = issuer.split('/').collect();
+        assert_eq!(parts.len(), 3, "issuer should have three slash-separated parts: {issuer}");
+        assert_eq!(parts[2], "kee");
+        // Host and user portions must be non-empty (fallbacks kick in if needed).
+        assert!(!parts[0].is_empty());
+        assert!(!parts[1].is_empty());
+    }
+}
