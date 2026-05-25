@@ -875,4 +875,73 @@ esac
             "expected aws stderr to be surfaced under --verbose, got: {stderr}"
         );
     }
+
+    // --- kee console: session_token guard ------------------------------------
+
+    /// Stub that:
+    /// - Lets the `sts get-caller-identity` preflight succeed.
+    /// - Returns export-credentials JSON *without* a SessionToken field,
+    ///   simulating long-term IAM creds (no STS).
+    ///
+    /// Any other call falls through to a no-op success.
+    const STUB_NO_SESSION_TOKEN: &str = r#"#!/bin/sh
+case "$1" in
+    sts) exit 0 ;;
+    sso-oidc) exit 1 ;;
+    configure)
+        if [ "$2" = "export-credentials" ]; then
+            echo '{"Version":1,"AccessKeyId":"AKIA","SecretAccessKey":"secret"}'
+            exit 0
+        fi
+        exit 0
+        ;;
+    *) exit 0 ;;
+esac
+"#;
+
+    #[test]
+    fn console_bails_when_credentials_lack_session_token() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        seed_config(home, &fixture_config());
+
+        let stub = aws_stub_dir(STUB_NO_SESSION_TOKEN);
+        kee_with_stub(home, &stub)
+            .args(["console", "acme.dev"])
+            .assert()
+            .code(1)
+            .stderr(contains("did not return a session token"))
+            .stderr(contains(
+                "Console federation requires temporary credentials",
+            ));
+    }
+
+    #[test]
+    fn console_bails_when_session_token_is_empty_string() {
+        // An explicit but empty SessionToken should hit the same guard as
+        // a missing field. Catches the !t.is_empty() check.
+        let stub_body = r#"#!/bin/sh
+case "$1" in
+    sts) exit 0 ;;
+    configure)
+        if [ "$2" = "export-credentials" ]; then
+            echo '{"Version":1,"AccessKeyId":"AKIA","SecretAccessKey":"s","SessionToken":""}'
+            exit 0
+        fi
+        exit 0
+        ;;
+    *) exit 0 ;;
+esac
+"#;
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        seed_config(home, &fixture_config());
+
+        let stub = aws_stub_dir(stub_body);
+        kee_with_stub(home, &stub)
+            .args(["console", "acme.dev"])
+            .assert()
+            .code(1)
+            .stderr(contains("did not return a session token"));
+    }
 }
