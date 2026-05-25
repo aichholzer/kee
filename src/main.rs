@@ -375,6 +375,17 @@ impl KeeManager {
         })
     }
 
+    /// Test-only constructor that lets callers point at a synthetic config
+    /// file and AWS manager. Used to drive command logic without touching
+    /// the real $HOME or hitting the filesystem in unexpected places.
+    #[cfg(test)]
+    fn new_with_paths(config_file: PathBuf, aws_manager: AwsManager) -> Self {
+        Self {
+            config_file,
+            aws_manager,
+        }
+    }
+
     fn load_config(&self) -> KeeConfig {
         if !self.config_file.exists() {
             return KeeConfig::default();
@@ -1828,10 +1839,7 @@ mod tests {
     fn install_target_zsh_uses_kee_completions_dir() {
         let home = std::path::PathBuf::from("/tmp/fake-home");
         let target = install_target(Shell::Zsh, &home).unwrap();
-        assert_eq!(
-            target.completion_path,
-            home.join(".kee/completions/_kee")
-        );
+        assert_eq!(target.completion_path, home.join(".kee/completions/_kee"));
         let edit = target.rc_edit.unwrap();
         assert_eq!(edit.rc_path, home.join(".zshrc"));
         assert!(edit.block.contains("fpath=(~/.kee/completions"));
@@ -1856,10 +1864,7 @@ mod tests {
         std::fs::write(home.join(".bash_profile"), "").unwrap();
 
         let target = install_target(Shell::Bash, home).unwrap();
-        assert_eq!(
-            target.rc_edit.unwrap().rc_path,
-            home.join(".bash_profile")
-        );
+        assert_eq!(target.rc_edit.unwrap().rc_path, home.join(".bash_profile"));
     }
 
     #[test]
@@ -2010,5 +2015,118 @@ mod tests {
 
         let modified = remove_rc_edit(&edit).unwrap();
         assert!(!modified);
+    }
+
+    // -- AWS CLI mocking via PATH shim ----------------------------------------
+    //
+    // These tests cover the binary's direct shell-outs to `aws`. The real
+    // binary on PATH is replaced with a small shell script that branches on
+    // its arguments and a KEE_TEST_AWS_MODE env var. PATH manipulation is
+    // process-global, so the tests run serially via #[serial_test::serial].
+
+    #[cfg(unix)]
+    mod aws_cli_shim {
+        use super::*;
+        use serial_test::serial;
+        use std::os::unix::fs::PermissionsExt;
+
+        /// Guard that restores the previous PATH when dropped.
+        struct PathGuard {
+            previous: Option<String>,
+        }
+
+        impl Drop for PathGuard {
+            fn drop(&mut self) {
+                match &self.previous {
+                    Some(p) => env::set_var("PATH", p),
+                    None => env::remove_var("PATH"),
+                }
+            }
+        }
+
+        /// Write an executable shell stub that simulates `aws`. Returns a
+        /// PathGuard that restores PATH when dropped, plus the tempdir kept
+        /// alive for the test's duration.
+        fn install_aws_stub(stub_body: &str) -> (PathGuard, tempfile::TempDir) {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let stub_path = tmp.path().join("aws");
+            std::fs::write(&stub_path, stub_body).unwrap();
+            std::fs::set_permissions(&stub_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+            let previous = env::var("PATH").ok();
+            let new_path = match &previous {
+                Some(p) => format!("{}:{}", tmp.path().display(), p),
+                None => tmp.path().display().to_string(),
+            };
+            env::set_var("PATH", &new_path);
+
+            (PathGuard { previous }, tmp)
+        }
+
+        fn manager() -> KeeManager {
+            // The KeeManager we build is driven only through the methods that
+            // shell out to `aws`. Config file path and AwsManager paths can
+            // point at junk; nothing reads from them in these tests.
+            let tmp = tempfile::TempDir::new().unwrap();
+            let aws_manager = AwsManager::new_with_paths(
+                tmp.path().join("aws-config"),
+                tmp.path().join("sso-cache"),
+            );
+            // We leak the tempdir intentionally; the OS reclaims it after
+            // the test process exits. Otherwise dropping it here would race
+            // with later filesystem access.
+            std::mem::forget(tmp);
+            KeeManager::new_with_paths(std::path::PathBuf::from("/nonexistent"), aws_manager)
+        }
+
+        // -- check_credentials ------------------------------------------------
+
+        #[test]
+        #[serial]
+        fn check_credentials_returns_true_on_zero_exit() {
+            let (_guard, _tmp) = install_aws_stub("#!/bin/sh\nexit 0\n");
+            let mgr = manager();
+            assert!(mgr.check_credentials("any-profile"));
+        }
+
+        #[test]
+        #[serial]
+        fn check_credentials_returns_false_on_nonzero_exit() {
+            let (_guard, _tmp) = install_aws_stub("#!/bin/sh\nexit 1\n");
+            let mgr = manager();
+            assert!(!mgr.check_credentials("any-profile"));
+        }
+
+        #[test]
+        #[serial]
+        fn check_credentials_returns_false_when_aws_missing() {
+            // PATH points only at an empty tempdir, so any attempt to exec
+            // `aws` fails with ENOENT.
+            let tmp = tempfile::TempDir::new().unwrap();
+            let previous = env::var("PATH").ok();
+            env::set_var("PATH", tmp.path());
+            let _guard = PathGuard { previous };
+
+            let mgr = manager();
+            assert!(!mgr.check_credentials("any-profile"));
+        }
+
+        // -- sso_login --------------------------------------------------------
+
+        #[test]
+        #[serial]
+        fn sso_login_succeeds_when_aws_exits_zero() {
+            let (_guard, _tmp) = install_aws_stub("#!/bin/sh\nexit 0\n");
+            let mgr = manager();
+            assert!(mgr.sso_login("any-profile").unwrap());
+        }
+
+        #[test]
+        #[serial]
+        fn sso_login_reports_failure_on_nonzero_exit() {
+            let (_guard, _tmp) = install_aws_stub("#!/bin/sh\nexit 7\n");
+            let mgr = manager();
+            assert!(!mgr.sso_login("any-profile").unwrap());
+        }
     }
 }

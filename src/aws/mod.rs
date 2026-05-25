@@ -361,10 +361,9 @@ mod tests {
     fn find_sso_cache_returns_none_when_dir_missing() {
         let tmp = TempDir::new().unwrap();
         let mgr = manager_with_cache(&tmp.path().join("does-not-exist"));
-        assert!(
-            mgr.find_sso_cache_file(&profile("https://acme.awsapps.com/start"))
-                .is_none()
-        );
+        assert!(mgr
+            .find_sso_cache_file(&profile("https://acme.awsapps.com/start"))
+            .is_none());
     }
 
     #[test]
@@ -402,10 +401,9 @@ mod tests {
         );
 
         let mgr = manager_with_cache(&cache_dir);
-        assert!(
-            mgr.find_sso_cache_file(&profile("https://nope.awsapps.com/start"))
-                .is_none()
-        );
+        assert!(mgr
+            .find_sso_cache_file(&profile("https://nope.awsapps.com/start"))
+            .is_none());
     }
 
     #[test]
@@ -443,10 +441,9 @@ mod tests {
         );
 
         let mgr = manager_with_cache(&cache_dir);
-        assert!(
-            mgr.find_sso_cache_file(&profile("https://acme.awsapps.com/start"))
-                .is_some()
-        );
+        assert!(mgr
+            .find_sso_cache_file(&profile("https://acme.awsapps.com/start"))
+            .is_some());
     }
 
     // -- read_token_expiry ----------------------------------------------------
@@ -481,10 +478,9 @@ mod tests {
         );
 
         let mgr = manager_with_cache(&cache_dir);
-        assert!(
-            mgr.read_token_expiry(&profile("https://acme.awsapps.com/start"))
-                .is_none()
-        );
+        assert!(mgr
+            .read_token_expiry(&profile("https://acme.awsapps.com/start"))
+            .is_none());
     }
 
     #[test]
@@ -500,10 +496,9 @@ mod tests {
         );
 
         let mgr = manager_with_cache(&cache_dir);
-        assert!(
-            mgr.read_token_expiry(&profile("https://acme.awsapps.com/start"))
-                .is_none()
-        );
+        assert!(mgr
+            .read_token_expiry(&profile("https://acme.awsapps.com/start"))
+            .is_none());
     }
 
     #[test]
@@ -518,10 +513,9 @@ mod tests {
         );
 
         let mgr = manager_with_cache(&cache_dir);
-        assert!(
-            mgr.read_token_expiry(&profile("https://acme.awsapps.com/start"))
-                .is_none()
-        );
+        assert!(mgr
+            .read_token_expiry(&profile("https://acme.awsapps.com/start"))
+            .is_none());
     }
 
     // -- ProfileInfo round-trip with production flag --------------------------
@@ -558,5 +552,303 @@ mod tests {
         }"#;
         let p: ProfileInfo = serde_json::from_str(json).unwrap();
         assert!(!p.production);
+    }
+
+    // -- try_refresh_token / do_refresh_token (PATH-shimmed `aws`) -----------
+    //
+    // These tests replace the `aws` binary on PATH with a small shell stub.
+    // PATH is process-global, so the tests are serialised explicitly.
+
+    #[cfg(unix)]
+    mod refresh_token {
+        use super::*;
+        use serial_test::serial;
+        use std::os::unix::fs::PermissionsExt;
+
+        struct PathGuard {
+            previous: Option<String>,
+        }
+
+        impl Drop for PathGuard {
+            fn drop(&mut self) {
+                match &self.previous {
+                    Some(p) => std::env::set_var("PATH", p),
+                    None => std::env::remove_var("PATH"),
+                }
+            }
+        }
+
+        /// Install a shell stub that pretends to be `aws`. Returns the guard
+        /// (restores PATH on drop) and the tempdir (kept alive for the test).
+        fn install_aws_stub(stub_body: &str) -> (PathGuard, tempfile::TempDir) {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let stub = tmp.path().join("aws");
+            fs::write(&stub, stub_body).unwrap();
+            fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+
+            let previous = std::env::var("PATH").ok();
+            let new_path = match &previous {
+                Some(p) => format!("{}:{}", tmp.path().display(), p),
+                None => tmp.path().display().to_string(),
+            };
+            std::env::set_var("PATH", &new_path);
+
+            (PathGuard { previous }, tmp)
+        }
+
+        /// Stub that always emits a successful create-token response.
+        const STUB_OK: &str = r#"#!/bin/sh
+cat <<'JSON'
+{"accessToken":"new-access","expiresIn":28800,"refreshToken":"new-refresh"}
+JSON
+exit 0
+"#;
+
+        /// Stub that simulates the InvalidGrantException case: AWS rejected
+        /// our refresh token. The cache will be checked afterwards to decide
+        /// whether the session is alive.
+        const STUB_INVALID_GRANT: &str = r#"#!/bin/sh
+echo "An error occurred (InvalidGrantException)" >&2
+exit 255
+"#;
+
+        /// Standard cache JSON pointing at acme. expiresAt and refreshToken
+        /// are passed in so each test can vary them.
+        fn cache_json(expires_at: &str, refresh_token: Option<&str>) -> String {
+            let refresh = refresh_token
+                .map(|t| format!(r#""refreshToken":"{t}","#))
+                .unwrap_or_default();
+            format!(
+                r#"{{
+                    "startUrl": "https://acme.awsapps.com/start",
+                    "region": "ap-southeast-2",
+                    "accessToken": "old-access",
+                    "expiresAt": "{expires_at}",
+                    "clientId": "abc",
+                    "clientSecret": "shh",
+                    "registrationExpiresAt": "2099-01-01T00:00:00Z",
+                    {refresh}
+                    "extraField": "ignored"
+                }}"#,
+                refresh = refresh
+            )
+        }
+
+        fn profile() -> ProfileInfo {
+            ProfileInfo {
+                profile_name: "acme.dev".into(),
+                sso_start_url: "https://acme.awsapps.com/start".into(),
+                sso_region: "ap-southeast-2".into(),
+                sso_account_id: "123456789012".into(),
+                sso_role_name: "Admin".into(),
+                session_name: "acme".into(),
+                production: false,
+            }
+        }
+
+        fn manager_with_cache_dir(cache_dir: &std::path::Path) -> AwsManager {
+            AwsManager::new_with_paths(
+                cache_dir.parent().unwrap().join("config"),
+                cache_dir.to_path_buf(),
+            )
+        }
+
+        // -- happy path -------------------------------------------------------
+
+        #[test]
+        #[serial]
+        fn refresh_succeeds_writes_updated_cache() {
+            let (_guard, _stub) = install_aws_stub(STUB_OK);
+
+            let tmp = tempfile::TempDir::new().unwrap();
+            let cache_dir = tmp.path().join("cache");
+            fs::create_dir_all(&cache_dir).unwrap();
+            let cache_file = cache_dir.join("entry.json");
+            fs::write(
+                &cache_file,
+                cache_json("2026-01-01T00:00:00Z", Some("old-refresh")),
+            )
+            .unwrap();
+
+            let mgr = manager_with_cache_dir(&cache_dir);
+            assert!(mgr.try_refresh_token(&profile()));
+
+            // Verify the cache was updated.
+            let body = fs::read_to_string(&cache_file).unwrap();
+            assert!(
+                body.contains("new-access"),
+                "access token should be updated"
+            );
+            assert!(
+                body.contains("new-refresh"),
+                "refresh token should rotate to the new one"
+            );
+            // Old token should be gone.
+            assert!(!body.contains("old-access"));
+        }
+
+        #[test]
+        #[serial]
+        fn refresh_writes_atomically_no_tmp_leftovers() {
+            // After a successful refresh the cache directory should contain
+            // exactly the original entry, not a leftover .tmp file from the
+            // tmp-and-rename strategy used by do_refresh_token.
+            let (_guard, _stub) = install_aws_stub(STUB_OK);
+
+            let tmp = tempfile::TempDir::new().unwrap();
+            let cache_dir = tmp.path().join("cache");
+            fs::create_dir_all(&cache_dir).unwrap();
+            fs::write(
+                cache_dir.join("entry.json"),
+                cache_json("2026-01-01T00:00:00Z", Some("old-refresh")),
+            )
+            .unwrap();
+
+            let mgr = manager_with_cache_dir(&cache_dir);
+            assert!(mgr.try_refresh_token(&profile()));
+
+            let entries: Vec<_> = fs::read_dir(&cache_dir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().into_string().unwrap())
+                .collect();
+            assert_eq!(
+                entries.len(),
+                1,
+                "expected exactly one cache file, got {entries:?}"
+            );
+            assert_eq!(entries[0], "entry.json");
+        }
+
+        // -- token rotation by another process --------------------------------
+
+        #[test]
+        #[serial]
+        fn refresh_recovers_when_other_process_already_rotated() {
+            // Simulate: our refresh request fails because another tool
+            // (AWS CLI / SDK / SOPS) already rotated the refresh token.
+            // The cache on disk now holds a fresh, valid token written by
+            // that other process. try_refresh_token should detect this and
+            // return true rather than warning the user.
+            let (_guard, _stub) = install_aws_stub(STUB_INVALID_GRANT);
+
+            let tmp = tempfile::TempDir::new().unwrap();
+            let cache_dir = tmp.path().join("cache");
+            fs::create_dir_all(&cache_dir).unwrap();
+            // expiresAt is in the future.
+            fs::write(
+                cache_dir.join("entry.json"),
+                cache_json("2099-01-01T00:00:00Z", Some("rotated-by-other-tool")),
+            )
+            .unwrap();
+
+            let mgr = manager_with_cache_dir(&cache_dir);
+            assert!(
+                mgr.try_refresh_token(&profile()),
+                "session is alive even though our refresh failed"
+            );
+        }
+
+        #[test]
+        #[serial]
+        fn refresh_fails_when_token_genuinely_dead() {
+            // Refresh request fails AND the cache says the token is expired.
+            // Nothing to recover; report failure honestly.
+            let (_guard, _stub) = install_aws_stub(STUB_INVALID_GRANT);
+
+            let tmp = tempfile::TempDir::new().unwrap();
+            let cache_dir = tmp.path().join("cache");
+            fs::create_dir_all(&cache_dir).unwrap();
+            fs::write(
+                cache_dir.join("entry.json"),
+                cache_json("2020-01-01T00:00:00Z", Some("old-refresh")),
+            )
+            .unwrap();
+
+            let mgr = manager_with_cache_dir(&cache_dir);
+            assert!(!mgr.try_refresh_token(&profile()));
+        }
+
+        // -- early-return branches (no AWS call) ------------------------------
+
+        #[test]
+        #[serial]
+        fn refresh_skips_when_no_refresh_token_in_cache() {
+            // Stub would always succeed if called, but the cache has no
+            // refresh token, so we shouldn't even try.
+            let (_guard, _stub) = install_aws_stub(STUB_OK);
+
+            let tmp = tempfile::TempDir::new().unwrap();
+            let cache_dir = tmp.path().join("cache");
+            fs::create_dir_all(&cache_dir).unwrap();
+            fs::write(
+                cache_dir.join("entry.json"),
+                cache_json("2026-01-01T00:00:00Z", None),
+            )
+            .unwrap();
+
+            let mgr = manager_with_cache_dir(&cache_dir);
+            // Cache says expiresAt is in 2026 (past for our test fixture, but
+            // try_refresh_token's fallback only treats it as "alive" when it's
+            // in the future). 2026-01-01 may be in the past at runtime, so
+            // expect false.
+            assert!(!mgr.try_refresh_token(&profile()));
+        }
+
+        #[test]
+        #[serial]
+        fn refresh_skips_when_client_registration_expired() {
+            // Stub would succeed, but registrationExpiresAt is in the past,
+            // so do_refresh_token bails before invoking it.
+            let (_guard, _stub) = install_aws_stub(STUB_OK);
+
+            let tmp = tempfile::TempDir::new().unwrap();
+            let cache_dir = tmp.path().join("cache");
+            fs::create_dir_all(&cache_dir).unwrap();
+            // Hand-build the cache with an expired registration timestamp.
+            let body = r#"{
+                "startUrl": "https://acme.awsapps.com/start",
+                "region": "ap-southeast-2",
+                "accessToken": "old",
+                "expiresAt": "2020-01-01T00:00:00Z",
+                "clientId": "abc",
+                "clientSecret": "shh",
+                "registrationExpiresAt": "2020-01-01T00:00:00Z",
+                "refreshToken": "old-refresh"
+            }"#;
+            fs::write(cache_dir.join("entry.json"), body).unwrap();
+
+            let mgr = manager_with_cache_dir(&cache_dir);
+            assert!(!mgr.try_refresh_token(&profile()));
+        }
+
+        #[test]
+        #[serial]
+        fn refresh_skips_when_cache_file_missing() {
+            let (_guard, _stub) = install_aws_stub(STUB_OK);
+
+            let tmp = tempfile::TempDir::new().unwrap();
+            let cache_dir = tmp.path().join("cache");
+            fs::create_dir_all(&cache_dir).unwrap();
+            // No cache file written.
+
+            let mgr = manager_with_cache_dir(&cache_dir);
+            assert!(!mgr.try_refresh_token(&profile()));
+        }
+
+        #[test]
+        #[serial]
+        fn refresh_skips_on_malformed_cache_json() {
+            let (_guard, _stub) = install_aws_stub(STUB_OK);
+
+            let tmp = tempfile::TempDir::new().unwrap();
+            let cache_dir = tmp.path().join("cache");
+            fs::create_dir_all(&cache_dir).unwrap();
+            // File matches by extension but content is junk.
+            fs::write(cache_dir.join("entry.json"), "not json").unwrap();
+
+            let mgr = manager_with_cache_dir(&cache_dir);
+            assert!(!mgr.try_refresh_token(&profile()));
+        }
     }
 }
