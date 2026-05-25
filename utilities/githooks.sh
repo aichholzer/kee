@@ -31,12 +31,15 @@ if [ -f ".git/hooks/pre-commit" ]; then
     fi
 fi
 
+# Make sure the hooks directory exists
+mkdir -p .git/hooks
+
 # Copy the hook file and make sure it's executable
 cp ./utilities/pre-commit .git/hooks/pre-commit
 chmod u+x .git/hooks/pre-commit
 
 echo ""
-echo -e " ${WHITE}Pre-commit hook setup complete!${WHITET}"
+echo -e " ${WHITE}Pre-commit hook setup complete!${RESET}"
 echo
 echo -e "${YELLOW} The hook will now run these checks before each commit:${RESET}"
 echo -e " - ${WHITE}cargo fmt -- --check${RESET} (code formatting)"
