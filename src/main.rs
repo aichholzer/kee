@@ -741,10 +741,15 @@ impl KeeManager {
             })
             .collect();
 
+        // Spinner runs while we wait for the AWS calls (account aliases) to
+        // come back. Dropping it clears the line; we don't use stop() because
+        // we don't want a result-line printed before the status output.
         println!();
-        for handle in handles {
-            let (name, info, expiry, alias) = handle.join().unwrap();
+        let spinner = Spinner::start("Fetching session details...");
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        drop(spinner);
 
+        for (name, info, expiry, alias) in results {
             let is_current = current.as_deref() == Some(&name);
             let marker = if is_current { " *" } else { "" };
 
