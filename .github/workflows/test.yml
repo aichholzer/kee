@@ -84,7 +84,7 @@ jobs:
           tool: cargo-tarpaulin
 
       - name: Run tests with coverage
-        run: cargo tarpaulin --out Xml
+        run: cargo tarpaulin --out Xml --out Stdout --fail-under 60
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5

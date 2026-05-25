@@ -461,6 +461,22 @@ cd ~/.kee
 ./utilities/githooks.sh
 ```
 
+### Test coverage
+
+CI runs [`cargo-tarpaulin`](https://github.com/xd009642/tarpaulin) on Linux and fails the build if line coverage drops below 60%. To check locally:
+
+```bash
+cargo install cargo-tarpaulin
+cargo tarpaulin --out Stdout
+```
+
+Tarpaulin only runs on Linux; macOS and Windows users can rely on CI for the coverage report.
+
+A few notes on the floor:
+
+- It's deliberately conservative. Tests for subprocess-driven code (anything that goes through `assert_cmd::Command`) don't show up cleanly in tarpaulin since the binary launches a child.
+- The floor is meant to catch regressions, not chase a number. Bump it up over time as coverage improves.
+
 ### Versioning
 
 We use [semantic versioning](https://semver.org/). Version bumps are handled with [`cargo-release`](https://github.com/crate-ci/cargo-release).
