@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-05-26
+
+### Added
+
+- Global `--verbose` / `-v` flag prints diagnostic detail to stderr,
+  prefixed with `[v]`. Useful when something silently fails:
+  - `check_credentials` shows the AWS CLI's stderr on failure
+    instead of swallowing it.
+  - `do_refresh_token` reports cache parse errors, expired client
+    registrations, and the `aws sso-oidc create-token` exit status
+    plus stderr on failure.
+  - The background `SessionRefresher` logs every refresh attempt
+    with timing and outcome.
+  - Default behaviour stays silent; verbose is opt-in.
+
 ## [1.6.3] - 2026-05-26
 
 ### Changed
@@ -207,6 +222,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `~/.aws/config` using the modern `sso-session` format.
 - Shell completions for zsh, bash, and fish.
 
+[1.7.0]: https://github.com/aichholzer/kee.rs/compare/v1.6.3...v1.7.0
 [1.6.3]: https://github.com/aichholzer/kee.rs/compare/v1.6.2...v1.6.3
 [1.6.2]: https://github.com/aichholzer/kee.rs/compare/v1.6.1...v1.6.2
 [1.6.1]: https://github.com/aichholzer/kee.rs/compare/v1.6.0...v1.6.1

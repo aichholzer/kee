@@ -6,6 +6,28 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Global verbose flag. When true, kee prints diagnostic detail (AWS CLI
+/// stderr, refresh-attempt outcomes, cache parse errors) to stderr.
+/// Default behaviour stays silent.
+pub static VERBOSE: AtomicBool = AtomicBool::new(false);
+
+/// Read the verbose flag.
+pub fn is_verbose() -> bool {
+    VERBOSE.load(Ordering::Relaxed)
+}
+
+/// Print a diagnostic line to stderr, but only when --verbose is on.
+macro_rules! vlog {
+    ($($arg:tt)*) => {
+        if $crate::aws::is_verbose() {
+            eprintln!(" [v] {}", format!($($arg)*));
+        }
+    };
+}
+#[allow(unused_imports)]
+pub(crate) use vlog;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ProfileInfo {
@@ -170,9 +192,30 @@ impl AwsManager {
     }
 
     fn do_refresh_token(&self, profile_info: &ProfileInfo) -> Option<()> {
-        let cache_file = self.find_sso_cache_file(profile_info)?;
-        let content = fs::read_to_string(&cache_file).ok()?;
-        let cache: SsoTokenCache = serde_json::from_str(&content).ok()?;
+        let cache_file = match self.find_sso_cache_file(profile_info) {
+            Some(p) => p,
+            None => {
+                vlog!(
+                    "no SSO cache file matching start_url '{}'",
+                    profile_info.sso_start_url
+                );
+                return None;
+            }
+        };
+        let content = match fs::read_to_string(&cache_file) {
+            Ok(c) => c,
+            Err(e) => {
+                vlog!("read {}: {}", cache_file.display(), e);
+                return None;
+            }
+        };
+        let cache: SsoTokenCache = match serde_json::from_str(&content) {
+            Ok(c) => c,
+            Err(e) => {
+                vlog!("parse {}: {}", cache_file.display(), e);
+                return None;
+            }
+        };
 
         let refresh_token = cache.refresh_token.as_ref().filter(|t| !t.is_empty())?;
         let client_id = cache.client_id.as_ref().filter(|id| !id.is_empty())?;
@@ -182,6 +225,7 @@ impl AwsManager {
         if let Some(ref reg_expires) = cache.registration_expires_at {
             let expires = reg_expires.parse::<chrono::DateTime<Utc>>().ok()?;
             if Utc::now() >= expires {
+                vlog!("client registration expired at {reg_expires}");
                 return None;
             }
         }
@@ -205,10 +249,24 @@ impl AwsManager {
             .env("AWS_CLI_AUTO_PROMPT", "off")
             .env("AWS_PAGER", "")
             .output()
-            .ok()
-            .filter(|o| o.status.success())?;
+            .ok()?;
 
-        let response: CreateTokenResponse = serde_json::from_slice(&output.stdout).ok()?;
+        if !output.status.success() {
+            vlog!(
+                "aws sso-oidc create-token failed (status {}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+            return None;
+        }
+
+        let response: CreateTokenResponse = match serde_json::from_slice(&output.stdout) {
+            Ok(r) => r,
+            Err(e) => {
+                vlog!("parse create-token response: {e}");
+                return None;
+            }
+        };
 
         // Build the updated cache and write it back
         let expires_at =

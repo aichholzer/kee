@@ -41,6 +41,11 @@ const AWS_PAGER: &str = "AWS_PAGER";
 #[command(about = format!("{KEE_ART}\n V. {}", env!("CARGO_PKG_VERSION")))]
 #[command(long_about = format!("{KEE_ART}\n V. {}\n\nExamples:\n  kee                        Show current profile or this help\n  kee add myprofile          Add a new AWS profile\n  kee use                    Pick a profile interactively (starts sub-shell)\n  kee use myprofile          Use a specific profile (starts sub-shell)\n  kee aws myprofile s3 ls    Run an AWS CLI command with a profile\n  kee run myprofile -- CMD   Run any command with a profile (no sub-shell)\n  kee console                Open the AWS console (current session or picker)\n  kee console myprofile      Open the AWS console for a specific profile\n  kee status                 Show all profiles with session status and expiry\n  kee ls                     List all available profiles\n  kee current                Show current, active profile\n  kee rm                     Pick a profile to remove interactively\n  kee rm myprofile           Remove a specific profile", env!("CARGO_PKG_VERSION")))]
 struct Cli {
+    /// Print diagnostic detail to stderr (AWS CLI errors, refresh outcomes,
+    /// cache parsing issues). Useful when something silent-fails.
+    #[arg(long, short = 'v', global = true)]
+    verbose: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -278,7 +283,16 @@ impl SessionRefresher {
 
                 // Refresh. Surface state transitions to the user via stderr so a
                 // silently-dying session is at least visible in the sub-shell.
+                aws::vlog!(
+                    "background refresher: attempting refresh for '{}' (slept {sleep_secs}s)",
+                    profile_info.profile_name
+                );
                 let ok = aws_manager.try_refresh_token(&profile_info);
+                aws::vlog!(
+                    "background refresher: refresh for '{}' -> {}",
+                    profile_info.profile_name,
+                    if ok { "ok" } else { "failed" }
+                );
                 match (last_ok, ok) {
                     (true, false) => {
                         eprintln!(
@@ -967,16 +981,44 @@ impl KeeManager {
     }
 
     fn check_credentials(&self, profile_name: &str) -> bool {
-        match Command::new("aws")
-            .args(["sts", "get-caller-identity", "--profile", profile_name])
+        let mut cmd = Command::new("aws");
+        cmd.args(["sts", "get-caller-identity", "--profile", profile_name])
             .env(AWS_CLI_AUTO_PROMPT, "off")
-            .env(AWS_PAGER, "")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-        {
-            Ok(status) => status.success(),
-            Err(_) => false,
+            .env(AWS_PAGER, "");
+
+        // In verbose mode, capture stderr so we can show it on failure.
+        // Otherwise discard it so the AWS CLI's auth errors don't pollute
+        // the terminal during normal operation.
+        if aws::is_verbose() {
+            match cmd
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
+                .output()
+            {
+                Ok(out) => {
+                    if !out.status.success() {
+                        let stderr = String::from_utf8_lossy(&out.stderr);
+                        let trimmed = stderr.trim();
+                        if !trimmed.is_empty() {
+                            aws::vlog!("aws sts get-caller-identity: {trimmed}");
+                        }
+                    }
+                    out.status.success()
+                }
+                Err(e) => {
+                    aws::vlog!("spawn aws sts: {e}");
+                    false
+                }
+            }
+        } else {
+            match cmd
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+            {
+                Ok(status) => status.success(),
+                Err(_) => false,
+            }
         }
     }
 
@@ -1574,6 +1616,12 @@ fn main() -> io::Result<()> {
     };
 
     let kee = KeeManager::new()?;
+
+    // Wire up the global verbose flag so AwsManager + SessionRefresher
+    // can react without needing the flag threaded through every call.
+    if cli.verbose {
+        aws::VERBOSE.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
 
     // No subcommand: show the current session if active, otherwise print help.
     // Only KEE_ACTIVE_PROFILE counts as "in a session" — the config field can
