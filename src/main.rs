@@ -130,10 +130,37 @@ enum Commands {
         #[arg(long)]
         no_production: bool,
     },
-    /// Generate shell completion script for the given shell
+    /// Generate or install shell completion scripts
     Completions {
+        #[command(subcommand)]
+        action: CompletionsAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum CompletionsAction {
+    /// Print the completion script to stdout
+    Print {
         #[arg(value_name = "SHELL", help = "Shell to generate completions for")]
         shell: Shell,
+    },
+    /// Install completions for the current shell (or one specified with --shell)
+    Install {
+        #[arg(
+            long,
+            value_name = "SHELL",
+            help = "Shell to install completions for (auto-detected if omitted)"
+        )]
+        shell: Option<Shell>,
+    },
+    /// Remove installed completions
+    Uninstall {
+        #[arg(
+            long,
+            value_name = "SHELL",
+            help = "Shell to remove completions for (auto-detected if omitted)"
+        )]
+        shell: Option<Shell>,
     },
 }
 
@@ -1205,25 +1232,301 @@ fn patch_zsh_profile_completion(script: String) -> String {
 }
 
 /// Print the completion script for the given shell to stdout.
-fn print_completions(shell: Shell) {
+/// Generate the completion script for the given shell and return it.
+fn build_completions(shell: Shell) -> String {
     let mut cmd = Cli::command();
     let bin_name = "kee";
+    let mut buf: Vec<u8> = Vec::new();
+    generate(shell, &mut cmd, bin_name, &mut buf);
+    let mut script = String::from_utf8_lossy(&buf).into_owned();
 
+    // Zsh needs profile_name completers swapped in.
     if matches!(shell, Shell::Zsh) {
-        // For zsh, capture clap's output, swap in our profile-name completer
-        // for arguments that refer to existing profiles, and append the
-        // helper function.
-        let mut buf: Vec<u8> = Vec::new();
-        generate(shell, &mut cmd, bin_name, &mut buf);
-        let script = String::from_utf8_lossy(&buf).into_owned();
-        let patched = patch_zsh_profile_completion(script);
-        print!("{patched}");
-        print!("{}", dynamic_completion_snippet(shell));
-        return;
+        script = patch_zsh_profile_completion(script);
     }
 
-    generate(shell, &mut cmd, bin_name, &mut io::stdout());
-    print!("{}", dynamic_completion_snippet(shell));
+    script.push_str(dynamic_completion_snippet(shell));
+    script
+}
+
+/// Detect the user's current shell. Looks at $SHELL first, then falls back
+/// to checking which rc files exist.
+fn detect_current_shell() -> Option<Shell> {
+    if let Ok(shell_path) = env::var("SHELL") {
+        if let Some(name) = std::path::Path::new(&shell_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+        {
+            match name {
+                "bash" => return Some(Shell::Bash),
+                "zsh" => return Some(Shell::Zsh),
+                "fish" => return Some(Shell::Fish),
+                _ => {}
+            }
+        }
+    }
+
+    let home = dirs::home_dir()?;
+    if home.join(".zshrc").exists() {
+        Some(Shell::Zsh)
+    } else if home.join(".bashrc").exists() || home.join(".bash_profile").exists() {
+        Some(Shell::Bash)
+    } else if home.join(".config/fish/config.fish").exists() {
+        Some(Shell::Fish)
+    } else {
+        None
+    }
+}
+
+/// Where the completion script lives on disk for a given shell, plus the
+/// rc-file edit (if any) needed to load it.
+struct InstallTarget {
+    completion_path: PathBuf,
+    /// rc file to edit, and the line(s) to ensure are present. Pairs with a
+    /// marker substring used to detect prior installs idempotently.
+    rc_edit: Option<RcEdit>,
+}
+
+struct RcEdit {
+    rc_path: PathBuf,
+    marker: &'static str,
+    block: String,
+}
+
+fn install_target(shell: Shell, home: &std::path::Path) -> Option<InstallTarget> {
+    match shell {
+        Shell::Zsh => {
+            let completion_path = home.join(".kee/completions/_kee");
+            let rc_path = home.join(".zshrc");
+            let block = "\n# Kee completion\nfpath=(~/.kee/completions $fpath)\nautoload -Uz compinit && compinit\n".to_string();
+            Some(InstallTarget {
+                completion_path,
+                rc_edit: Some(RcEdit {
+                    rc_path,
+                    marker: "~/.kee/completions",
+                    block,
+                }),
+            })
+        }
+        Shell::Bash => {
+            let completion_path = home.join(".kee/.kee_completion.bash");
+            // Prefer .bashrc; fall back to .bash_profile if it's the only one.
+            let bashrc = home.join(".bashrc");
+            let bash_profile = home.join(".bash_profile");
+            let rc_path = if bashrc.exists() || !bash_profile.exists() {
+                bashrc
+            } else {
+                bash_profile
+            };
+            let block = "\n# Kee completion\nsource ~/.kee/.kee_completion.bash\n".to_string();
+            Some(InstallTarget {
+                completion_path,
+                rc_edit: Some(RcEdit {
+                    rc_path,
+                    marker: ".kee_completion.bash",
+                    block,
+                }),
+            })
+        }
+        Shell::Fish => {
+            // Fish auto-loads anything in this directory; no rc edit needed.
+            let completion_path = home.join(".config/fish/completions/kee.fish");
+            Some(InstallTarget {
+                completion_path,
+                rc_edit: None,
+            })
+        }
+        // PowerShell and Elvish: no installer, but the script can still be
+        // generated via `kee completions print <shell>`.
+        _ => None,
+    }
+}
+
+/// Append `block` to `rc_path` if `marker` is not already present.
+/// Returns true if the rc file was modified.
+fn ensure_rc_edit(edit: &RcEdit) -> io::Result<bool> {
+    let already_present = if edit.rc_path.exists() {
+        let existing = fs::read_to_string(&edit.rc_path)?;
+        existing.contains(edit.marker)
+    } else {
+        false
+    };
+
+    if already_present {
+        return Ok(false);
+    }
+
+    if let Some(parent) = edit.rc_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut content = if edit.rc_path.exists() {
+        fs::read_to_string(&edit.rc_path)?
+    } else {
+        String::new()
+    };
+    content.push_str(&edit.block);
+    fs::write(&edit.rc_path, content)?;
+    Ok(true)
+}
+
+/// Remove the rc-file block by stripping any contiguous run of lines that
+/// includes `marker`. Best-effort: trims trailing whitespace lines too.
+fn remove_rc_edit(edit: &RcEdit) -> io::Result<bool> {
+    if !edit.rc_path.exists() {
+        return Ok(false);
+    }
+    let content = fs::read_to_string(&edit.rc_path)?;
+    if !content.contains(edit.marker) {
+        return Ok(false);
+    }
+
+    // Drop the marker line and any "# Kee completion" comment immediately
+    // above or related lines below in the same block. We use the whole
+    // injected block as the search target for a clean removal when it
+    // matches verbatim, and a line-filter fallback otherwise.
+    let new_content = if content.contains(edit.block.trim_start()) {
+        content.replacen(edit.block.trim_start(), "", 1)
+    } else {
+        content
+            .lines()
+            .filter(|l| !l.contains(edit.marker) && l.trim() != "# Kee completion")
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n"
+    };
+
+    fs::write(&edit.rc_path, new_content)?;
+    Ok(true)
+}
+
+/// Install completions: generate the script, write it to the right place,
+/// and edit the user's rc file to load it.
+fn install_completions(shell: Option<Shell>) -> io::Result<()> {
+    let shell = match shell.or_else(detect_current_shell) {
+        Some(s) => s,
+        None => {
+            eprintln!(
+                "\n [X] Could not detect your shell. Pass {} explicitly.",
+                hlt("--shell <SHELL>")
+            );
+            eprintln!(
+                "     Supported: {}, {}, {}",
+                hlt("bash"),
+                hlt("zsh"),
+                hlt("fish")
+            );
+            return Ok(());
+        }
+    };
+
+    let home = dirs::home_dir()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Could not find home directory"))?;
+
+    let target = match install_target(shell, &home) {
+        Some(t) => t,
+        None => {
+            eprintln!(
+                "\n [!] Automatic install isn't supported for {shell:?}.\n     Run {} and follow your shell's documentation.",
+                hlt(&format!("kee completions print {shell}"))
+            );
+            return Ok(());
+        }
+    };
+
+    if let Some(parent) = target.completion_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let script = build_completions(shell);
+    fs::write(&target.completion_path, script)?;
+    println!(
+        "\n [✓] Wrote completions to {}",
+        hlt(&target.completion_path.display().to_string())
+    );
+
+    if let Some(ref edit) = target.rc_edit {
+        if ensure_rc_edit(edit)? {
+            println!(" [✓] Updated {}", hlt(&edit.rc_path.display().to_string()));
+        } else {
+            println!(
+                " [✓] {} already configured",
+                hlt(&edit.rc_path.display().to_string())
+            );
+        }
+
+        let reload = match shell {
+            Shell::Zsh => "source ~/.zshrc",
+            Shell::Bash => "source ~/.bashrc",
+            _ => "restart your terminal",
+        };
+        println!("\n Restart your terminal or run: {}", hlt(reload));
+    } else {
+        println!(" Restart your terminal for completions to take effect.");
+    }
+
+    Ok(())
+}
+
+/// Uninstall completions: remove the file and undo the rc edit.
+fn uninstall_completions(shell: Option<Shell>) -> io::Result<()> {
+    let shell = match shell.or_else(detect_current_shell) {
+        Some(s) => s,
+        None => {
+            eprintln!(
+                "\n [X] Could not detect your shell. Pass {} explicitly.",
+                hlt("--shell <SHELL>")
+            );
+            return Ok(());
+        }
+    };
+
+    let home = dirs::home_dir()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Could not find home directory"))?;
+
+    let target = match install_target(shell, &home) {
+        Some(t) => t,
+        None => {
+            eprintln!("\n [!] No installer for {shell:?}; nothing to uninstall.");
+            return Ok(());
+        }
+    };
+
+    if target.completion_path.exists() {
+        fs::remove_file(&target.completion_path)?;
+        println!(
+            "\n [✓] Removed {}",
+            hlt(&target.completion_path.display().to_string())
+        );
+    } else {
+        println!(
+            "\n [!] {} did not exist",
+            hlt(&target.completion_path.display().to_string())
+        );
+    }
+
+    if let Some(ref edit) = target.rc_edit {
+        if remove_rc_edit(edit)? {
+            println!(
+                " [✓] Cleaned up {}",
+                hlt(&edit.rc_path.display().to_string())
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Dispatch the `completions` subcommand.
+fn run_completions_action(action: CompletionsAction) -> io::Result<()> {
+    match action {
+        CompletionsAction::Print { shell } => {
+            print!("{}", build_completions(shell));
+            Ok(())
+        }
+        CompletionsAction::Install { shell } => install_completions(shell),
+        CompletionsAction::Uninstall { shell } => uninstall_completions(shell),
+    }
 }
 
 fn main() -> io::Result<()> {
@@ -1265,11 +1568,10 @@ fn main() -> io::Result<()> {
         }
     };
 
-    // `completions` is a pure script emitter; skip the rest of the dispatch
-    // so it works before the user has run any other kee command.
-    if let Commands::Completions { shell } = command {
-        print_completions(shell);
-        return Ok(());
+    // `completions` doesn't need any kee state; handle it before the rest
+    // of the dispatch so it works in any environment.
+    if let Commands::Completions { action } = command {
+        return run_completions_action(action);
     }
 
     match command {
@@ -1328,8 +1630,9 @@ fn main() -> io::Result<()> {
         Commands::Status => {
             kee.status_command()?;
         }
-        Commands::Completions { shell } => {
-            print_completions(shell);
+        Commands::Completions { .. } => {
+            // Handled above. clap's exhaustiveness check still requires the arm.
+            unreachable!()
         }
     }
 

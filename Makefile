@@ -10,16 +10,16 @@ build-release:
 
 # Install shell completions
 install-completions:
-	./scripts/install-completions.sh
+	kee completions install
 
 # Uninstall shell completions
 uninstall-completions:
-	./scripts/uninstall-completions.sh
+	kee completions uninstall
 
 # Install locally (includes completions)
 install:
 	cargo install --path . --quiet
-	./scripts/install-completions.sh
+	kee completions install
 
 # Run all tests
 test:

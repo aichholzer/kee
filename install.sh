@@ -61,9 +61,11 @@ if [[ ":$PATH:" != *":$CARGO_BIN:"* ]]; then
     esac
 fi
 
-# Install shell auto-completion
-if [[ -f "./scripts/install-auto-complete.sh" ]]; then
-    ./scripts/install-auto-complete.sh
+# Install shell auto-completion via the binary itself.
+if command -v kee >/dev/null 2>&1; then
+    kee completions install
+elif [[ -x "$CARGO_BIN/kee" ]]; then
+    "$CARGO_BIN/kee" completions install
 fi
 
 echo ""

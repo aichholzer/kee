@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.1] - 2026-05-25
+
+### Breaking
+
+- `kee completions <shell>` is now `kee completions print <shell>`.
+  The single-form is replaced by nested actions (`print`, `install`,
+  `uninstall`) so the same subcommand owns the whole lifecycle.
+
+### Added
+
+- `kee completions install [--shell SHELL]` auto-detects the user's
+  shell, drops the completion script in the right place, and edits
+  the shell config idempotently. Re-running is a no-op.
+- `kee completions uninstall [--shell SHELL]` reverses the install:
+  removes the script and undoes the rc-file edit.
+
+### Removed
+
+- The `scripts/` directory and its three shell scripts. The binary now
+  owns the entire completion lifecycle. `install.sh` and `Makefile`
+  call `kee completions install` directly.
+
 ## [1.6.0] - 2026-05-25
 
 ### Added
@@ -159,6 +181,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `~/.aws/config` using the modern `sso-session` format.
 - Shell completions for zsh, bash, and fish.
 
+[1.6.1]: https://github.com/aichholzer/kee.rs/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/aichholzer/kee.rs/compare/v1.5.1...v1.6.0
 [1.5.1]: https://github.com/aichholzer/kee.rs/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/aichholzer/kee.rs/compare/v1.4.2...v1.5.0

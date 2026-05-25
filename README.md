@@ -50,24 +50,15 @@ A simple tool to help you manage multiple AWS profiles, with SSO support and eas
 cargo install kee
 ```
 
-After install, generate shell completions for your shell:
+After install, set up shell completions in one command:
 
 ```bash
-# zsh — add ~/.kee/completions to your fpath, then:
-mkdir -p ~/.kee/completions
-kee completions zsh > ~/.kee/completions/_kee
-
-# bash — source the generated script from your profile:
-mkdir -p ~/.kee
-kee completions bash > ~/.kee/.kee_completion.bash
-echo 'source ~/.kee/.kee_completion.bash' >> ~/.bashrc
-
-# fish — drops straight into the standard completions dir:
-kee completions fish > ~/.config/fish/completions/kee.fish
+kee completions install
 ```
 
-Restart your shell (or `source` the relevant rc file) to pick up the
-completions.
+This auto-detects your shell (bash, zsh, or fish), drops the script in
+the right place, and edits your shell config to load it. Restart your
+terminal or `source` the relevant rc file to pick up completions.
 
 ### Install from source
 
