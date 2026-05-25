@@ -40,6 +40,8 @@ ureq = { version = "2.10", features = ["json"] }
 tempfile = "3.8"
 mockall = "0.12"
 serial_test = "3.0"
+assert_cmd = "2.0"
+predicates = "3.1"
 
 [features]
 default = []
