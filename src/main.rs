@@ -1,4 +1,5 @@
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{generate, Shell};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
@@ -128,6 +129,11 @@ enum Commands {
         /// Unmark as a production account
         #[arg(long)]
         no_production: bool,
+    },
+    /// Generate shell completion script for the given shell
+    Completions {
+        #[arg(value_name = "SHELL", help = "Shell to generate completions for")]
+        shell: Shell,
     },
 }
 
@@ -1104,6 +1110,122 @@ fn open_in_browser(url: &str) -> io::Result<()> {
     }
 }
 
+/// Per-shell snippet that adds dynamic completion of profile names by
+/// shelling out to `kee ls --names`. Appended to the base script that
+/// clap_complete generates so the user gets profile suggestions for the
+/// commands that take a profile name.
+fn dynamic_completion_snippet(shell: Shell) -> &'static str {
+    match shell {
+        Shell::Zsh => {
+            r#"
+# Kee — dynamic profile name completion
+_kee_profiles() {
+    local -a profiles
+    profiles=("${(@f)$(kee ls --names 2>/dev/null)}")
+    if (( ${#profiles[@]} > 0 )) && [[ -n "${profiles[1]}" ]]; then
+        _values 'profile' "${profiles[@]}"
+    fi
+}
+"#
+        }
+        Shell::Bash => {
+            r#"
+# Kee — dynamic profile name completion
+# Wraps clap's _kee completer so existing-profile arguments suggest
+# configured profile names. Falls through to clap's completion otherwise.
+_kee_with_profiles() {
+    local cur prev
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+    case "$prev" in
+        use|rm|set|run|aws|console)
+            local profiles
+            profiles=$(kee ls --names 2>/dev/null)
+            COMPREPLY=( $(compgen -W "$profiles" -- "$cur") )
+            return 0
+            ;;
+    esac
+    # Defer to the clap-generated completer for everything else.
+    _kee
+}
+complete -F _kee_with_profiles -o bashdefault -o default kee
+"#
+        }
+        Shell::Fish => {
+            r#"
+# Kee — dynamic profile name completion
+function __kee_profiles
+    kee ls --names 2>/dev/null
+end
+complete -c kee -n "__fish_seen_subcommand_from use rm set run aws console" -f -a "(__kee_profiles)"
+"#
+        }
+        // PowerShell and Elvish: clap_complete output covers subcommands
+        // and flags. Profile name completion isn't wired up; users on
+        // those shells can still type names manually.
+        _ => "",
+    }
+}
+
+/// Rewrite clap_complete's zsh output so `profile_name` arguments use our
+/// custom `_kee_profiles` function instead of the no-op `_default`.
+///
+/// `kee add` takes a *new* profile name, so we don't suggest existing ones.
+/// Other subcommands' `profile_name` should complete from configured
+/// profiles. We also leave the trailing-args completers (`cmd`, `args`) on
+/// `kee run` and `kee aws` alone, since those are arbitrary commands.
+fn patch_zsh_profile_completion(script: String) -> String {
+    // Strategy: swap `:_default` to `:_kee_profiles` only on lines whose
+    // help text starts with "Name of the AWS profile". Use a sentinel
+    // marker so we can do a targeted replacement without a full parser.
+    let sentinel = "\u{0001}KEE_SWAP\u{0001}";
+
+    script
+        // Mark exactly the lines we want to swap.
+        .replace(
+            "profile_name -- Name of the AWS profile",
+            &format!("profile_name -- {sentinel}Name of the AWS profile"),
+        )
+        // For each marked line, swap `:_default` for `:_kee_profiles`.
+        // The marker still lives on the line, so this is line-local.
+        .lines()
+        .map(|line| {
+            if line.contains(sentinel) {
+                line.replacen(":_default", ":_kee_profiles", 1)
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        // Drop the sentinel.
+        .replace(sentinel, "")
+        // Preserve the trailing newline that `lines()` strips.
+        + "\n"
+}
+
+/// Print the completion script for the given shell to stdout.
+fn print_completions(shell: Shell) {
+    let mut cmd = Cli::command();
+    let bin_name = "kee";
+
+    if matches!(shell, Shell::Zsh) {
+        // For zsh, capture clap's output, swap in our profile-name completer
+        // for arguments that refer to existing profiles, and append the
+        // helper function.
+        let mut buf: Vec<u8> = Vec::new();
+        generate(shell, &mut cmd, bin_name, &mut buf);
+        let script = String::from_utf8_lossy(&buf).into_owned();
+        let patched = patch_zsh_profile_completion(script);
+        print!("{patched}");
+        print!("{}", dynamic_completion_snippet(shell));
+        return;
+    }
+
+    generate(shell, &mut cmd, bin_name, &mut io::stdout());
+    print!("{}", dynamic_completion_snippet(shell));
+}
+
 fn main() -> io::Result<()> {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
@@ -1142,6 +1264,13 @@ fn main() -> io::Result<()> {
             return Ok(());
         }
     };
+
+    // `completions` is a pure script emitter; skip the rest of the dispatch
+    // so it works before the user has run any other kee command.
+    if let Commands::Completions { shell } = command {
+        print_completions(shell);
+        return Ok(());
+    }
 
     match command {
         Commands::Add { profile_name } => {
@@ -1198,6 +1327,9 @@ fn main() -> io::Result<()> {
         }
         Commands::Status => {
             kee.status_command()?;
+        }
+        Commands::Completions { shell } => {
+            print_completions(shell);
         }
     }
 
