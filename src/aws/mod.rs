@@ -45,6 +45,15 @@ impl AwsManager {
         })
     }
 
+    /// Test-only constructor that lets callers point at synthetic paths.
+    #[cfg(test)]
+    pub(crate) fn new_with_paths(aws_config_file: PathBuf, sso_cache_dir: PathBuf) -> Self {
+        Self {
+            aws_config_file,
+            sso_cache_dir,
+        }
+    }
+
     pub fn load_config(&self) -> io::Result<Ini> {
         if !self.aws_config_file.exists() {
             return Ok(Ini::new());
@@ -311,4 +320,243 @@ struct CreateTokenResponse {
     pub expires_in: Option<i64>,
     #[serde(default)]
     pub refresh_token: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// Build a ProfileInfo pointing at the given start URL. Other fields are
+    /// filler; they aren't checked by the cache-finding logic.
+    fn profile(start_url: &str) -> ProfileInfo {
+        ProfileInfo {
+            profile_name: "test".into(),
+            sso_start_url: start_url.into(),
+            sso_region: "ap-southeast-2".into(),
+            sso_account_id: "123456789012".into(),
+            sso_role_name: "TestRole".into(),
+            session_name: "test-session".into(),
+            production: false,
+        }
+    }
+
+    /// Write a JSON file representing one entry in `~/.aws/sso/cache`.
+    fn write_cache_file(dir: &std::path::Path, name: &str, body: &str) {
+        fs::write(dir.join(name), body).unwrap();
+    }
+
+    fn manager_with_cache(cache_dir: &std::path::Path) -> AwsManager {
+        AwsManager::new_with_paths(
+            // aws_config_file isn't exercised by these tests; point at a
+            // sibling path that doesn't exist.
+            cache_dir.parent().unwrap().join("config"),
+            cache_dir.to_path_buf(),
+        )
+    }
+
+    // -- find_sso_cache_file --------------------------------------------------
+
+    #[test]
+    fn find_sso_cache_returns_none_when_dir_missing() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = manager_with_cache(&tmp.path().join("does-not-exist"));
+        assert!(
+            mgr.find_sso_cache_file(&profile("https://acme.awsapps.com/start"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn find_sso_cache_matches_by_start_url() {
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join("cache");
+        fs::create_dir_all(&cache_dir).unwrap();
+        write_cache_file(
+            &cache_dir,
+            "abc.json",
+            r#"{"startUrl":"https://acme.awsapps.com/start","accessToken":"t"}"#,
+        );
+        write_cache_file(
+            &cache_dir,
+            "def.json",
+            r#"{"startUrl":"https://other.awsapps.com/start","accessToken":"t"}"#,
+        );
+
+        let mgr = manager_with_cache(&cache_dir);
+        let found = mgr
+            .find_sso_cache_file(&profile("https://acme.awsapps.com/start"))
+            .expect("should match");
+        assert!(found.ends_with("abc.json"));
+    }
+
+    #[test]
+    fn find_sso_cache_returns_none_when_no_match() {
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join("cache");
+        fs::create_dir_all(&cache_dir).unwrap();
+        write_cache_file(
+            &cache_dir,
+            "abc.json",
+            r#"{"startUrl":"https://acme.awsapps.com/start","accessToken":"t"}"#,
+        );
+
+        let mgr = manager_with_cache(&cache_dir);
+        assert!(
+            mgr.find_sso_cache_file(&profile("https://nope.awsapps.com/start"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn find_sso_cache_tolerates_malformed_json() {
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join("cache");
+        fs::create_dir_all(&cache_dir).unwrap();
+        // Garbage file alongside a valid one. The lookup must skip the first
+        // and find the second.
+        write_cache_file(&cache_dir, "broken.json", "not json at all");
+        write_cache_file(
+            &cache_dir,
+            "ok.json",
+            r#"{"startUrl":"https://acme.awsapps.com/start","accessToken":"t"}"#,
+        );
+
+        let mgr = manager_with_cache(&cache_dir);
+        let found = mgr
+            .find_sso_cache_file(&profile("https://acme.awsapps.com/start"))
+            .expect("should match the well-formed file");
+        assert!(found.ends_with("ok.json"));
+    }
+
+    #[test]
+    fn find_sso_cache_ignores_non_json_files() {
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join("cache");
+        fs::create_dir_all(&cache_dir).unwrap();
+        // Stray file that isn't JSON; the function looks at .json only.
+        fs::write(cache_dir.join("README.txt"), "ignore me").unwrap();
+        write_cache_file(
+            &cache_dir,
+            "ok.json",
+            r#"{"startUrl":"https://acme.awsapps.com/start","accessToken":"t"}"#,
+        );
+
+        let mgr = manager_with_cache(&cache_dir);
+        assert!(
+            mgr.find_sso_cache_file(&profile("https://acme.awsapps.com/start"))
+                .is_some()
+        );
+    }
+
+    // -- read_token_expiry ----------------------------------------------------
+
+    #[test]
+    fn read_token_expiry_parses_valid_timestamp() {
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join("cache");
+        fs::create_dir_all(&cache_dir).unwrap();
+        write_cache_file(
+            &cache_dir,
+            "ok.json",
+            r#"{"startUrl":"https://acme.awsapps.com/start","accessToken":"t","expiresAt":"2099-01-01T00:00:00Z"}"#,
+        );
+
+        let mgr = manager_with_cache(&cache_dir);
+        let expiry = mgr
+            .read_token_expiry(&profile("https://acme.awsapps.com/start"))
+            .expect("should parse");
+        assert_eq!(expiry.format("%Y-%m-%d").to_string(), "2099-01-01");
+    }
+
+    #[test]
+    fn read_token_expiry_returns_none_for_missing_field() {
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join("cache");
+        fs::create_dir_all(&cache_dir).unwrap();
+        write_cache_file(
+            &cache_dir,
+            "ok.json",
+            r#"{"startUrl":"https://acme.awsapps.com/start","accessToken":"t"}"#,
+        );
+
+        let mgr = manager_with_cache(&cache_dir);
+        assert!(
+            mgr.read_token_expiry(&profile("https://acme.awsapps.com/start"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn read_token_expiry_returns_none_for_unmatched_profile() {
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join("cache");
+        fs::create_dir_all(&cache_dir).unwrap();
+        // Cache file exists, but for a different start URL.
+        write_cache_file(
+            &cache_dir,
+            "ok.json",
+            r#"{"startUrl":"https://other.awsapps.com/start","accessToken":"t","expiresAt":"2099-01-01T00:00:00Z"}"#,
+        );
+
+        let mgr = manager_with_cache(&cache_dir);
+        assert!(
+            mgr.read_token_expiry(&profile("https://acme.awsapps.com/start"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn read_token_expiry_returns_none_for_malformed_timestamp() {
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join("cache");
+        fs::create_dir_all(&cache_dir).unwrap();
+        write_cache_file(
+            &cache_dir,
+            "ok.json",
+            r#"{"startUrl":"https://acme.awsapps.com/start","accessToken":"t","expiresAt":"not a date"}"#,
+        );
+
+        let mgr = manager_with_cache(&cache_dir);
+        assert!(
+            mgr.read_token_expiry(&profile("https://acme.awsapps.com/start"))
+                .is_none()
+        );
+    }
+
+    // -- ProfileInfo round-trip with production flag --------------------------
+
+    #[test]
+    fn profile_info_serialises_production_flag() {
+        let p = ProfileInfo {
+            profile_name: "prod".into(),
+            sso_start_url: "https://acme.awsapps.com/start".into(),
+            sso_region: "ap-southeast-2".into(),
+            sso_account_id: "123456789012".into(),
+            sso_role_name: "Admin".into(),
+            session_name: "acme".into(),
+            production: true,
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(json.contains("\"production\":true"));
+
+        let back: ProfileInfo = serde_json::from_str(&json).unwrap();
+        assert!(back.production);
+    }
+
+    #[test]
+    fn profile_info_defaults_production_when_missing() {
+        // Older configs (before the production flag was added) won't have the
+        // field. Deserialising must default it to false rather than failing.
+        let json = r#"{
+            "profile_name": "legacy",
+            "sso_start_url": "https://acme.awsapps.com/start",
+            "sso_region": "ap-southeast-2",
+            "sso_account_id": "123456789012",
+            "sso_role_name": "Admin",
+            "session_name": "acme"
+        }"#;
+        let p: ProfileInfo = serde_json::from_str(json).unwrap();
+        assert!(!p.production);
+    }
 }

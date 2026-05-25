@@ -1694,7 +1694,10 @@ mod tests {
 
     #[test]
     fn console_url_default_for_empty_region() {
-        assert_eq!(console_url_for_region(""), "https://console.aws.amazon.com/");
+        assert_eq!(
+            console_url_for_region(""),
+            "https://console.aws.amazon.com/"
+        );
     }
 
     #[test]
@@ -1770,8 +1773,8 @@ mod tests {
     fn patch_leaves_trailing_args_completer_alone() {
         // `kee run` and `kee aws` take arbitrary trailing args; their
         // `cmd`/`args` completers must stay on `:_default`.
-        let input = "'*::cmd -- Command and arguments to run (use -- before flags):_default'\n"
-            .to_string();
+        let input =
+            "'*::cmd -- Command and arguments to run (use -- before flags):_default'\n".to_string();
         let out = patch_zsh_profile_completion(input);
         assert!(out.contains(":_default"));
         assert!(!out.contains(":_kee_profiles"));
@@ -1792,7 +1795,9 @@ mod tests {
         // kee add line: still :_default.
         assert!(out.contains("Name for the new AWS profile:_default"));
         // kee use line: now :_kee_profiles.
-        assert!(out.contains("Name of the AWS profile to use (interactive picker if omitted):_kee_profiles"));
+        assert!(out.contains(
+            "Name of the AWS profile to use (interactive picker if omitted):_kee_profiles"
+        ));
         // cmd/args line: still :_default.
         assert!(out.contains("Command and arguments to run (use -- before flags):_default"));
         // kee set line: now :_kee_profiles.
@@ -1806,10 +1811,204 @@ mod tests {
         let issuer = build_issuer();
         // Format: {host}/{user}/kee — three parts separated by `/`.
         let parts: Vec<&str> = issuer.split('/').collect();
-        assert_eq!(parts.len(), 3, "issuer should have three slash-separated parts: {issuer}");
+        assert_eq!(
+            parts.len(),
+            3,
+            "issuer should have three slash-separated parts: {issuer}"
+        );
         assert_eq!(parts[2], "kee");
         // Host and user portions must be non-empty (fallbacks kick in if needed).
         assert!(!parts[0].is_empty());
         assert!(!parts[1].is_empty());
+    }
+
+    // -- install_target -------------------------------------------------------
+
+    #[test]
+    fn install_target_zsh_uses_kee_completions_dir() {
+        let home = std::path::PathBuf::from("/tmp/fake-home");
+        let target = install_target(Shell::Zsh, &home).unwrap();
+        assert_eq!(
+            target.completion_path,
+            home.join(".kee/completions/_kee")
+        );
+        let edit = target.rc_edit.unwrap();
+        assert_eq!(edit.rc_path, home.join(".zshrc"));
+        assert!(edit.block.contains("fpath=(~/.kee/completions"));
+        assert!(edit.block.contains("compinit"));
+    }
+
+    #[test]
+    fn install_target_bash_prefers_bashrc_when_present() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home = tmp.path();
+        std::fs::write(home.join(".bashrc"), "").unwrap();
+
+        let target = install_target(Shell::Bash, home).unwrap();
+        assert_eq!(target.rc_edit.unwrap().rc_path, home.join(".bashrc"));
+    }
+
+    #[test]
+    fn install_target_bash_falls_back_to_bash_profile() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home = tmp.path();
+        // No .bashrc present.
+        std::fs::write(home.join(".bash_profile"), "").unwrap();
+
+        let target = install_target(Shell::Bash, home).unwrap();
+        assert_eq!(
+            target.rc_edit.unwrap().rc_path,
+            home.join(".bash_profile")
+        );
+    }
+
+    #[test]
+    fn install_target_fish_skips_rc_edit() {
+        let home = std::path::PathBuf::from("/tmp/fake-home");
+        let target = install_target(Shell::Fish, &home).unwrap();
+        assert_eq!(
+            target.completion_path,
+            home.join(".config/fish/completions/kee.fish")
+        );
+        // Fish auto-loads from the completions directory; no rc edit needed.
+        assert!(target.rc_edit.is_none());
+    }
+
+    #[test]
+    fn install_target_unsupported_shells_return_none() {
+        let home = std::path::PathBuf::from("/tmp/fake-home");
+        assert!(install_target(Shell::PowerShell, &home).is_none());
+        assert!(install_target(Shell::Elvish, &home).is_none());
+    }
+
+    // -- ensure_rc_edit -------------------------------------------------------
+
+    fn make_edit(rc_path: std::path::PathBuf, marker: &'static str, block: &str) -> RcEdit {
+        RcEdit {
+            rc_path,
+            marker,
+            block: block.to_string(),
+        }
+    }
+
+    #[test]
+    fn ensure_rc_edit_appends_when_marker_absent() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let rc = tmp.path().join(".zshrc");
+        std::fs::write(&rc, "# existing line\n").unwrap();
+        let edit = make_edit(rc.clone(), "kee marker", "\n# kee marker\nappended\n");
+
+        let modified = ensure_rc_edit(&edit).unwrap();
+        assert!(modified);
+        let body = std::fs::read_to_string(&rc).unwrap();
+        assert!(body.contains("# existing line"));
+        assert!(body.contains("# kee marker"));
+        assert!(body.contains("appended"));
+    }
+
+    #[test]
+    fn ensure_rc_edit_is_idempotent() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let rc = tmp.path().join(".zshrc");
+        std::fs::write(&rc, "preamble\n# kee marker\nalready here\n").unwrap();
+        let edit = make_edit(rc.clone(), "kee marker", "\n# kee marker\nalready here\n");
+
+        let modified = ensure_rc_edit(&edit).unwrap();
+        assert!(!modified, "second run should detect marker and skip");
+        let body = std::fs::read_to_string(&rc).unwrap();
+        // Should still contain the marker only once.
+        assert_eq!(body.matches("# kee marker").count(), 1);
+    }
+
+    #[test]
+    fn ensure_rc_edit_creates_rc_file_when_missing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let rc = tmp.path().join(".zshrc");
+        // rc file doesn't exist yet.
+        let edit = make_edit(rc.clone(), "kee marker", "# kee marker\nbody\n");
+
+        let modified = ensure_rc_edit(&edit).unwrap();
+        assert!(modified);
+        assert!(rc.exists());
+        let body = std::fs::read_to_string(&rc).unwrap();
+        assert!(body.contains("# kee marker"));
+    }
+
+    #[test]
+    fn ensure_rc_edit_creates_parent_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let rc = tmp.path().join("nested/dir/.config");
+        let edit = make_edit(rc.clone(), "kee marker", "# kee marker\nbody\n");
+
+        let modified = ensure_rc_edit(&edit).unwrap();
+        assert!(modified);
+        assert!(rc.exists());
+    }
+
+    // -- remove_rc_edit -------------------------------------------------------
+
+    #[test]
+    fn remove_rc_edit_strips_verbatim_block() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let rc = tmp.path().join(".zshrc");
+        let block = "\n# kee marker\nbody\n";
+        std::fs::write(&rc, format!("preamble\n{block}suffix\n")).unwrap();
+        let edit = make_edit(rc.clone(), "kee marker", block);
+
+        let modified = remove_rc_edit(&edit).unwrap();
+        assert!(modified);
+        let body = std::fs::read_to_string(&rc).unwrap();
+        assert!(body.contains("preamble"));
+        assert!(body.contains("suffix"));
+        assert!(!body.contains("kee marker"));
+    }
+
+    #[test]
+    fn remove_rc_edit_falls_back_to_line_filter() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let rc = tmp.path().join(".zshrc");
+        // Marker line is present but the surrounding whitespace differs from
+        // the canonical block, so the verbatim replacement won't match.
+        std::fs::write(
+            &rc,
+            "preamble\n# Kee completion\nfpath=(kee marker stuff)\nsuffix\n",
+        )
+        .unwrap();
+        let edit = make_edit(
+            rc.clone(),
+            "kee marker",
+            "\n# Kee completion\nfpath=(kee marker stuff)\n",
+        );
+
+        let modified = remove_rc_edit(&edit).unwrap();
+        assert!(modified);
+        let body = std::fs::read_to_string(&rc).unwrap();
+        assert!(body.contains("preamble"));
+        assert!(body.contains("suffix"));
+        assert!(!body.contains("kee marker"));
+        assert!(!body.contains("# Kee completion"));
+    }
+
+    #[test]
+    fn remove_rc_edit_no_op_when_marker_absent() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let rc = tmp.path().join(".zshrc");
+        std::fs::write(&rc, "just preamble\n").unwrap();
+        let edit = make_edit(rc.clone(), "kee marker", "# kee marker\nbody\n");
+
+        let modified = remove_rc_edit(&edit).unwrap();
+        assert!(!modified);
+        let body = std::fs::read_to_string(&rc).unwrap();
+        assert_eq!(body, "just preamble\n");
+    }
+
+    #[test]
+    fn remove_rc_edit_no_op_when_rc_missing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let rc = tmp.path().join("does-not-exist");
+        let edit = make_edit(rc, "kee marker", "# kee marker\nbody\n");
+
+        let modified = remove_rc_edit(&edit).unwrap();
+        assert!(!modified);
     }
 }
