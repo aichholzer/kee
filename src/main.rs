@@ -861,8 +861,21 @@ impl KeeManager {
             }
         };
 
-        // Build the federation session payload.
-        let session_token = creds.session_token.unwrap_or_default();
+        // Build the federation session payload. Console federation requires
+        // temporary credentials (which always include a session token); long-
+        // term IAM creds without one would fail later with a confusing error.
+        // Bail early with a clear message instead.
+        let session_token = match creds.session_token {
+            Some(t) if !t.is_empty() => t,
+            _ => {
+                eprintln!(
+                    "\n [X] Profile '{}' did not return a session token.",
+                    hlt(aws_profile)
+                );
+                eprintln!("     Console federation requires temporary credentials (SSO/STS).");
+                return Ok(1);
+            }
+        };
         let session_json = format!(
             r#"{{"sessionId":"{}","sessionKey":"{}","sessionToken":"{}"}}"#,
             creds.access_key_id, creds.secret_access_key, session_token
@@ -1012,7 +1025,10 @@ impl KeeManager {
         // Dropped automatically when this function returns.
         let _refresher = SessionRefresher::start(self.aws_manager.clone(), profile_info.clone());
 
-        let _ = cmd.status();
+        if let Err(e) = cmd.status() {
+            eprintln!("\n [X] Failed to start sub-shell ({shell}): {e}");
+            eprintln!("     Check your $SHELL environment variable.");
+        }
 
         println!("\n {} — Session ended.", hlt(profile_name));
         Ok(())
@@ -1067,16 +1083,9 @@ fn get_account_alias(profile_name: &str) -> Option<String> {
 /// Build the Issuer string AWS shows in the federation audit log.
 /// Format: {hostname}/{user}/kee, with fallbacks if either piece is missing.
 fn build_issuer() -> String {
-    let host = Command::new("hostname")
-        .output()
+    let host = hostname::get()
         .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                String::from_utf8(o.stdout).ok()
-            } else {
-                None
-            }
-        })
+        .and_then(|h| h.into_string().ok())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "unknown-host".to_string());

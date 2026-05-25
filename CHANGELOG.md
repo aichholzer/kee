@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.3] - 2026-05-26
+
+### Changed
+
+- `build_issuer()` now reads the hostname via `gethostname` (libc) instead
+  of shelling out to the `hostname` binary. Saves a fork+exec on every
+  `kee console` invocation and works in environments where `hostname`
+  isn't on PATH.
+
+### Fixed
+
+- `kee console` now bails out with a clear message if the profile returns
+  credentials without a session token (e.g. long-term IAM creds), instead
+  of silently sending an empty string to the AWS federation endpoint and
+  surfacing an opaque error.
+- `kee use` now reports a clear error if the sub-shell fails to spawn
+  (missing `$SHELL`, broken binary, etc). Previously the user just saw
+  "Session ended" with no context.
+
 ## [1.6.2] - 2026-05-25
 
 ### Changed
@@ -188,6 +207,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `~/.aws/config` using the modern `sso-session` format.
 - Shell completions for zsh, bash, and fish.
 
+[1.6.3]: https://github.com/aichholzer/kee.rs/compare/v1.6.2...v1.6.3
 [1.6.2]: https://github.com/aichholzer/kee.rs/compare/v1.6.1...v1.6.2
 [1.6.1]: https://github.com/aichholzer/kee.rs/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/aichholzer/kee.rs/compare/v1.5.1...v1.6.0
