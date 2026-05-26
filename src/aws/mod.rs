@@ -13,6 +13,31 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// Default behaviour stays silent.
 pub static VERBOSE: AtomicBool = AtomicBool::new(false);
 
+/// Resolve the user's home directory.
+///
+/// Prefers the `HOME` env var (Unix) or `USERPROFILE` (Windows) when set,
+/// falling back to `dirs::home_dir()` otherwise. The fallback on Windows
+/// calls a Win32 API that ignores environment overrides, which makes
+/// integration tests that point `HOME`/`USERPROFILE` at a tempdir useless.
+/// Honouring the env vars first restores parity with Unix behaviour and
+/// is harmless in production: real users on Windows have `USERPROFILE`
+/// set to their actual profile path anyway.
+pub fn home_dir() -> Option<PathBuf> {
+    if let Some(val) = std::env::var_os("HOME") {
+        if !val.is_empty() {
+            return Some(PathBuf::from(val));
+        }
+    }
+    if cfg!(windows) {
+        if let Some(val) = std::env::var_os("USERPROFILE") {
+            if !val.is_empty() {
+                return Some(PathBuf::from(val));
+            }
+        }
+    }
+    dirs::home_dir()
+}
+
 /// Read the verbose flag.
 pub fn is_verbose() -> bool {
     VERBOSE.load(Ordering::Relaxed)
@@ -51,7 +76,7 @@ pub struct AwsManager {
 #[allow(dead_code)]
 impl AwsManager {
     pub fn new() -> io::Result<Self> {
-        let home_dir = dirs::home_dir().ok_or_else(|| {
+        let home_dir = home_dir().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
                 "\n [X] Could not find the AWS home directory\n",

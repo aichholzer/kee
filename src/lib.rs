@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 mod aws;
-pub use aws::ProfileInfo;
+pub use aws::{home_dir, ProfileInfo};
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Default)]
 pub struct KeeConfig {

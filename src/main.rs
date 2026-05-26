@@ -13,7 +13,7 @@ use std::thread;
 use std::time::Duration;
 
 mod aws;
-use aws::{AwsManager, ProfileInfo};
+use aws::{home_dir, AwsManager, ProfileInfo};
 
 const BOLD_WHITE: &str = "\x1b[1;37m";
 const RESET: &str = "\x1b[0m";
@@ -391,7 +391,7 @@ impl KeeManager {
     }
 
     fn new() -> io::Result<Self> {
-        let home_dir = dirs::home_dir().ok_or_else(|| {
+        let home_dir = home_dir().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
                 "\n [X] Could not find home directory\n",
@@ -1356,7 +1356,7 @@ fn detect_current_shell() -> Option<Shell> {
         }
     }
 
-    let home = dirs::home_dir()?;
+    let home = home_dir()?;
     if home.join(".zshrc").exists() {
         Some(Shell::Zsh)
     } else if home.join(".bashrc").exists() || home.join(".bash_profile").exists() {
@@ -1510,7 +1510,7 @@ fn install_completions(shell: Option<Shell>) -> io::Result<()> {
         }
     };
 
-    let home = dirs::home_dir()
+    let home = home_dir()
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Could not find home directory"))?;
 
     let target = match install_target(shell, &home) {
@@ -1571,7 +1571,7 @@ fn uninstall_completions(shell: Option<Shell>) -> io::Result<()> {
         }
     };
 
-    let home = dirs::home_dir()
+    let home = home_dir()
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Could not find home directory"))?;
 
     let target = match install_target(shell, &home) {
