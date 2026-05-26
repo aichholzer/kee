@@ -33,7 +33,6 @@ A simple tool to help you manage multiple AWS profiles, with SSO support and eas
 - 🚀 **Performance**: Compiled binary, faster startup times
 - ⛑️ **Memory safety**: No runtime errors, guaranteed memory safety
 - 🌍 **Cross-platform**: Single binary works across platforms
-- 👌 **Zero dependencies**: No Python runtime required
 - ⚡️ **Concurrent**: Built-in concurrency support for future enhancements
 
 ## Installation
