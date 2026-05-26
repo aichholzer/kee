@@ -71,9 +71,13 @@ fn read_config(home: &Path) -> KeeConfig {
 /// Build a `kee` Command with HOME pointed at the tempdir, and KEE_*
 /// session env vars cleared so the child sees a clean state regardless of
 /// the test runner's environment.
+///
+/// On Windows, `dirs::home_dir()` reads `USERPROFILE` rather than `HOME`,
+/// so we set both to keep the helper portable.
 fn kee(home: &Path) -> Command {
     let mut cmd = Command::cargo_bin("kee").unwrap();
     cmd.env("HOME", home)
+        .env("USERPROFILE", home)
         .env_remove("KEE_ACTIVE_PROFILE")
         .env_remove("KEE_CURRENT_PROFILE");
     cmd
@@ -168,6 +172,7 @@ fn bare_kee_inside_session_shows_current_profile() {
     let tmp = TempDir::new().unwrap();
     let mut cmd = Command::cargo_bin("kee").unwrap();
     cmd.env("HOME", tmp.path())
+        .env("USERPROFILE", tmp.path())
         .env("KEE_ACTIVE_PROFILE", "1")
         .env("KEE_CURRENT_PROFILE", "acme.dev")
         .assert()
@@ -268,6 +273,7 @@ fn current_inside_session_reports_profile_from_env() {
     let tmp = TempDir::new().unwrap();
     let mut cmd = Command::cargo_bin("kee").unwrap();
     cmd.env("HOME", tmp.path())
+        .env("USERPROFILE", tmp.path())
         .env("KEE_ACTIVE_PROFILE", "1")
         .env("KEE_CURRENT_PROFILE", "acme.prod")
         .arg("current")
