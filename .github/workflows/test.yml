@@ -66,39 +66,32 @@ jobs:
 
   coverage:
     runs-on: ubuntu-latest
-    # Coverage is informational. Tarpaulin under --follow-exec is slow
-    # enough to flake on subprocess-heavy tests; we don't want that to
-    # gate the build. Codecov still gets the report when it succeeds.
+    # Coverage is informational. If the coverage tool fails for any
+    # reason (it's notoriously finicky with subprocess-heavy tests),
+    # we don't want that to gate the build. Codecov still gets the
+    # report when it succeeds.
     continue-on-error: true
     steps:
       - uses: actions/checkout@v5
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install cargo-tarpaulin
+      - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-tarpaulin
+          tool: cargo-llvm-cov
 
       - name: Run tests with coverage
-        # --follow-exec lets tarpaulin trace into binaries spawned by
-        # assert_cmd in tests/cli_tests.rs. Without it, anything those
-        # tests exercise looks uncovered.
-        # --timeout 300: instrumented tests are slower; the default 60s
-        # is tight for our CLI tests that spawn shell-script stubs.
-        # --skip add_: all `kee add` integration tests flake with
-        # <interrupted> under tarpaulin's instrumentation. The race
-        # appears to be between the `aws configure sso` shell-script
-        # stub and the dialoguer production prompt that follows. The
-        # paths are still covered by the regular test matrix on every
-        # push; we just don't get them in the coverage number.
-        # No --fail-under: tarpaulin still under-reports for subprocess
-        # code, so a hard gate is theatre. We track the trend on
-        # Codecov instead.
-        run: cargo tarpaulin --follow-exec --timeout 300 --out Xml --out Stdout -- --skip add_
+        # cargo-llvm-cov uses LLVM source-based coverage which works
+        # cleanly with binaries that spawn child processes (assert_cmd
+        # tests). Tarpaulin's ptrace-based approach was segfaulting on
+        # this codebase.
+        run: cargo llvm-cov --all-targets --cobertura --output-path cobertura.xml
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5

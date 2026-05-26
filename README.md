@@ -474,18 +474,18 @@ cd ~/.kee
 
 ### Test coverage
 
-CI runs [`cargo-tarpaulin`](https://github.com/xd009642/tarpaulin) on Linux and reports line coverage to Codecov. There is no hard threshold: tarpaulin under-reports for CLIs because it can't trace into binaries spawned by `assert_cmd`, so a gate would be misleading. Track the trend in PRs instead.
+CI runs [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov) on Linux and reports line coverage to Codecov. There is no hard threshold: it's a signal to track over time, not a gate.
 
 To check locally:
 
 ```bash
-cargo install cargo-tarpaulin
-cargo tarpaulin --follow-exec --out Stdout
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-targets
 ```
 
-`--follow-exec` lets tarpaulin trace into the binary that `assert_cmd` spawns from `tests/cli_tests.rs`. Without it, every line those tests exercise looks uncovered.
+`cargo-llvm-cov` uses LLVM source-based coverage, which traces cleanly into binaries spawned by `assert_cmd` in `tests/cli_tests.rs`. We previously used `cargo-tarpaulin`, which relied on ptrace and was unstable for subprocess-heavy tests.
 
-Tarpaulin only runs on Linux; macOS and Windows users can rely on CI for the coverage report.
+Coverage runs on Linux; macOS and Windows users can rely on CI for the report.
 
 ### Versioning
 

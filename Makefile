@@ -45,9 +45,9 @@ test-unit:
 test-cli:
 	cargo test --test cli_tests
 
-# Run tests with coverage report (Linux only; requires cargo-tarpaulin)
+# Run tests with coverage report (Linux only; requires cargo-llvm-cov)
 test-coverage:
-	cargo tarpaulin --follow-exec --out Html --output-dir coverage
+	cargo llvm-cov --all-targets --html --output-dir coverage
 
 # --- Quality ------------------------------------------------------------------
 
