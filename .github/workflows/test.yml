@@ -66,6 +66,10 @@ jobs:
 
   coverage:
     runs-on: ubuntu-latest
+    # Coverage is informational. Tarpaulin under --follow-exec is slow
+    # enough to flake on subprocess-heavy tests; we don't want that to
+    # gate the build. Codecov still gets the report when it succeeds.
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
@@ -83,10 +87,12 @@ jobs:
         # --follow-exec lets tarpaulin trace into binaries spawned by
         # assert_cmd in tests/cli_tests.rs. Without it, anything those
         # tests exercise looks uncovered.
+        # --timeout 300: instrumented tests are slower; the default 60s
+        # is tight for our CLI tests that spawn shell-script stubs.
         # No --fail-under: tarpaulin still under-reports for subprocess
         # code, so a hard gate is theatre. We track the trend on
         # Codecov instead.
-        run: cargo tarpaulin --follow-exec --out Xml --out Stdout
+        run: cargo tarpaulin --follow-exec --timeout 300 --out Xml --out Stdout
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
