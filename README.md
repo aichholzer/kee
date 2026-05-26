@@ -115,7 +115,7 @@ kee add mycompany.dev
 
 This will:
 
-- Run `aws configure sso --profile company.dev`
+- Run `aws configure sso --profile mycompany.dev`
 - Prompt you for your SSO configuration (start URL, region, etc.)
 - Open your browser for SSO authentication
 - Let you select your AWS account and role interactively
@@ -234,7 +234,8 @@ Requires AWS CLI v2.15+ (which provides `aws configure export-credentials`).
 ### List all profiles
 
 ```bash
-kee ls
+kee ls           # Pretty list
+kee ls --names   # Just the profile names, one per line (handy for scripting)
 ```
 
 Show a quick overview of all configured profiles.
