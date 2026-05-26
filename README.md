@@ -2,7 +2,13 @@
   <img src="https://raw.githubusercontent.com/aichholzer/kee/refs/heads/main/kee.png" alt="Kee" />
 </div>
 
-[![Tests](https://github.com/aichholzer/kee/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/aichholzer/kee/actions/workflows/test.yml) [![codecov](https://codecov.io/gh/aichholzer/kee/graph/badge.svg?token=YpgPwMbazO)](https://codecov.io/gh/aichholzer/kee) [![Latest version](https://img.shields.io/crates/v/kee.svg)](https://crates.io/crates/kee) ![License](https://img.shields.io/crates/l/kee.svg)<br />![OSX](https://img.shields.io/badge/-OSX-black) ![Linux](https://img.shields.io/badge/-Linux-green) ![Windows](https://img.shields.io/badge/-Windows-blue)
+[![Tests](https://github.com/aichholzer/kee/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/aichholzer/kee/actions/workflows/test.yml)
+[![codecov](https://codecov.io/gh/aichholzer/kee/graph/badge.svg?token=YpgPwMbazO)](https://codecov.io/gh/aichholzer/kee)
+[![Latest version](https://img.shields.io/crates/v/kee.svg)](https://crates.io/crates/kee)
+![License](https://img.shields.io/crates/l/kee.svg)<br />
+![OSX](https://img.shields.io/badge/-OSX-black)
+![Linux](https://img.shields.io/badge/-Linux-green)
+![Windows](https://img.shields.io/badge/-Windows-blue)
 
 A simple tool to help you manage multiple AWS profiles, with SSO support and easy account access.
 
