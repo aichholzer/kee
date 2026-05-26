@@ -800,22 +800,7 @@ impl KeeManager {
             let marker = if is_current { " *" } else { "" };
 
             // Single status line combining health and expiry.
-            let status_line = match expiry {
-                Some(exp) => {
-                    let remaining = exp - chrono::Utc::now();
-                    if remaining.num_seconds() <= 0 {
-                        "\x1b[0;31m●\x1b[0m Expired".to_string()
-                    } else if remaining.num_hours() > 0 {
-                        let h = remaining.num_hours();
-                        let m = remaining.num_minutes() % 60;
-                        format!("\x1b[0;32m●\x1b[0m Active ({h} hours, {m} minutes remaining)")
-                    } else {
-                        let m = remaining.num_minutes();
-                        format!("\x1b[0;32m●\x1b[0m Active ({m} minutes remaining)")
-                    }
-                }
-                None => "\x1b[0;31m●\x1b[0m Expired".to_string(),
-            };
+            let status_line = format_status_line(expiry);
 
             let alias_str = alias.unwrap_or_default();
             println!(" {}{}", hlt(&name), marker);
@@ -1143,6 +1128,36 @@ fn get_account_alias(profile_name: &str) -> Option<String> {
         .first()?
         .as_str()
         .map(|s| s.to_string())
+}
+
+/// Render the per-profile status line shown by `kee status`. Pure function:
+/// takes the cached token's expiry (None if unreadable or absent) and the
+/// current time as anchor, returns the coloured status string.
+fn format_status_line(expiry: Option<chrono::DateTime<chrono::Utc>>) -> String {
+    format_status_line_at(expiry, chrono::Utc::now())
+}
+
+/// Same as `format_status_line` but with an injectable anchor for testing.
+fn format_status_line_at(
+    expiry: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    match expiry {
+        Some(exp) => {
+            let remaining = exp - now;
+            if remaining.num_seconds() <= 0 {
+                "\x1b[0;31m●\x1b[0m Expired".to_string()
+            } else if remaining.num_hours() > 0 {
+                let h = remaining.num_hours();
+                let m = remaining.num_minutes() % 60;
+                format!("\x1b[0;32m●\x1b[0m Active ({h} hours, {m} minutes remaining)")
+            } else {
+                let m = remaining.num_minutes();
+                format!("\x1b[0;32m●\x1b[0m Active ({m} minutes remaining)")
+            }
+        }
+        None => "\x1b[0;31m●\x1b[0m Expired".to_string(),
+    }
 }
 
 /// Build the Issuer string AWS shows in the federation audit log.
@@ -1738,6 +1753,61 @@ fn main() -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- format_status_line ---------------------------------------------------
+
+    #[test]
+    fn status_line_expired_when_no_expiry_known() {
+        let s = format_status_line_at(None, chrono::Utc::now());
+        assert!(s.contains("Expired"));
+    }
+
+    #[test]
+    fn status_line_expired_when_expiry_in_past() {
+        let now = chrono::Utc::now();
+        let past = now - chrono::Duration::minutes(5);
+        let s = format_status_line_at(Some(past), now);
+        assert!(s.contains("Expired"));
+        assert!(!s.contains("Active"));
+    }
+
+    #[test]
+    fn status_line_expired_at_exact_zero_boundary() {
+        // num_seconds() <= 0 should land on Expired, not Active.
+        let now = chrono::Utc::now();
+        let s = format_status_line_at(Some(now), now);
+        assert!(s.contains("Expired"));
+    }
+
+    #[test]
+    fn status_line_active_minutes_only_under_one_hour() {
+        let now = chrono::Utc::now();
+        let exp = now + chrono::Duration::minutes(45);
+        let s = format_status_line_at(Some(exp), now);
+        assert!(s.contains("Active"));
+        // No "hours" string when remaining is under an hour.
+        assert!(!s.contains("hours"));
+        assert!(s.contains("45 minutes remaining"));
+    }
+
+    #[test]
+    fn status_line_active_includes_hours_and_minutes() {
+        let now = chrono::Utc::now();
+        let exp = now + chrono::Duration::hours(2) + chrono::Duration::minutes(15);
+        let s = format_status_line_at(Some(exp), now);
+        assert!(s.contains("2 hours"));
+        assert!(s.contains("15 minutes"));
+    }
+
+    #[test]
+    fn status_line_active_minutes_modulo_when_hours_present() {
+        // 90 minutes -> 1 hour, 30 minutes (not 1 hour, 90 minutes).
+        let now = chrono::Utc::now();
+        let exp = now + chrono::Duration::minutes(90);
+        let s = format_status_line_at(Some(exp), now);
+        assert!(s.contains("1 hours"));
+        assert!(s.contains("30 minutes"));
+    }
 
     // -- url_encode -----------------------------------------------------------
 
