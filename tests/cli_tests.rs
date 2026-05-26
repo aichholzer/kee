@@ -944,4 +944,40 @@ esac
             .code(1)
             .stderr(contains("did not return a session token"));
     }
+
+    // --- kee use: shell-launch failure ---------------------------------------
+
+    #[test]
+    fn use_reports_clear_error_when_shell_binary_is_missing() {
+        // start_subshell builds Command::new($SHELL) and runs status(). If
+        // $SHELL points at a non-existent path, status() returns Err and we
+        // should print a helpful message instead of silently saying
+        // "Session ended". This is the regression test for Vikunja #9.
+        //
+        // Command::status() returns Err immediately on ENOENT — no actual
+        // fork happens, so the test is safe and fast.
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        seed_config(home, &fixture_config());
+
+        let stub = aws_stub_dir(STUB_DEFAULT);
+        let output = kee_with_stub(home, &stub)
+            .arg("use")
+            .arg("acme.dev")
+            .env("SHELL", "/nonexistent/path/to/shell")
+            .output()
+            .unwrap();
+
+        // Exit code is whatever the function returned (Ok); the error is
+        // printed to stderr and execution continues to "Session ended".
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("Failed to start sub-shell"),
+            "expected shell-launch error in stderr, got: {stderr}"
+        );
+        assert!(
+            stderr.contains("Check your $SHELL"),
+            "expected $SHELL hint in stderr, got: {stderr}"
+        );
+    }
 }
