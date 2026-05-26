@@ -156,6 +156,14 @@ aws:mycompany.dev $ exit  # Terminate the session and return to your main shell
 
 ## Commands
 
+### Global flags
+
+These flags work with any command:
+
+- `-v`, `--verbose`: Print diagnostic detail to stderr (AWS CLI errors, refresh outcomes, cache parsing issues). Useful when something silently fails.
+- `-V`, `--version`: Print the installed version and exit.
+- `-h`, `--help`: Show help. Works on subcommands too (e.g., `kee use --help`).
+
 ### Show status or help
 
 ```bash
@@ -264,6 +272,17 @@ kee rm PROFILE_NAME    # Skip the picker
 ```
 
 Removes a profile configuration from `Kee` and the AWS config file.
+
+### Shell completions
+
+```bash
+kee completions install              # Install for the current shell (auto-detected)
+kee completions install --shell zsh  # Install for a specific shell
+kee completions uninstall            # Remove for the current shell
+kee completions print zsh            # Print the script to stdout (no install)
+```
+
+Install drops the completion script in the right place and edits your shell config to load it. Supported: `bash`, `zsh`, `fish`. For `powershell` and `elvish`, use `print` and follow your shell's documentation. Edits are idempotent: re-running `install` is safe.
 
 ## How It Works
 
@@ -427,16 +446,7 @@ aws sso login --profile PROFILE_NAME
 ## Future enhancements
 
 - **Built-in AWS SDK** integration (no AWS CLI dependency)
-- **Configuration validation** at compile time
 - **Plugin system** with dynamic loading
-- **TUI interface** with real-time updates
-
-**Binary distribution:**
-
-- Single executable file
-- No runtime dependencies
-- Easy deployment to servers
-- Container-friendly
 
 **Package managers:**
 
