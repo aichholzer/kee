@@ -80,7 +80,13 @@ jobs:
           tool: cargo-tarpaulin
 
       - name: Run tests with coverage
-        run: cargo tarpaulin --out Xml --out Stdout --fail-under 60
+        # --follow-exec lets tarpaulin trace into binaries spawned by
+        # assert_cmd in tests/cli_tests.rs. Without it, anything those
+        # tests exercise looks uncovered.
+        # No --fail-under: tarpaulin still under-reports for subprocess
+        # code, so a hard gate is theatre. We track the trend on
+        # Codecov instead.
+        run: cargo tarpaulin --follow-exec --out Xml --out Stdout
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5

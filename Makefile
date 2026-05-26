@@ -47,7 +47,7 @@ test-cli:
 
 # Run tests with coverage report (Linux only; requires cargo-tarpaulin)
 test-coverage:
-	cargo tarpaulin --out Html --output-dir coverage
+	cargo tarpaulin --follow-exec --out Html --output-dir coverage
 
 # --- Quality ------------------------------------------------------------------
 

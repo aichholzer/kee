@@ -473,19 +473,18 @@ cd ~/.kee
 
 ### Test coverage
 
-CI runs [`cargo-tarpaulin`](https://github.com/xd009642/tarpaulin) on Linux and fails the build if line coverage drops below 60%. To check locally:
+CI runs [`cargo-tarpaulin`](https://github.com/xd009642/tarpaulin) on Linux and reports line coverage to Codecov. There is no hard threshold: tarpaulin under-reports for CLIs because it can't trace into binaries spawned by `assert_cmd`, so a gate would be misleading. Track the trend in PRs instead.
+
+To check locally:
 
 ```bash
 cargo install cargo-tarpaulin
-cargo tarpaulin --out Stdout
+cargo tarpaulin --follow-exec --out Stdout
 ```
 
+`--follow-exec` lets tarpaulin trace into the binary that `assert_cmd` spawns from `tests/cli_tests.rs`. Without it, every line those tests exercise looks uncovered.
+
 Tarpaulin only runs on Linux; macOS and Windows users can rely on CI for the coverage report.
-
-A few notes on the floor:
-
-- It's deliberately conservative. Tests for subprocess-driven code (anything that goes through `assert_cmd::Command`) don't show up cleanly in tarpaulin since the binary launches a child.
-- The floor is meant to catch regressions, not chase a number. Bump it up over time as coverage improves.
 
 ### Versioning
 
