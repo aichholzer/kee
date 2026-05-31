@@ -6,7 +6,7 @@
 [![codecov](https://codecov.io/gh/aichholzer/kee/graph/badge.svg?token=YpgPwMbazO)](https://codecov.io/gh/aichholzer/kee)
 [![Latest version](https://img.shields.io/crates/v/kee.svg)](https://crates.io/crates/kee)
 ![License](https://img.shields.io/crates/l/kee.svg)<br />
-![OSX](https://img.shields.io/badge/-OSX-black)
+![macOS](https://img.shields.io/badge/-macOS-black)
 ![Linux](https://img.shields.io/badge/-Linux-green)
 ![Windows](https://img.shields.io/badge/-Windows-blue)
 
