@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.2] - 2026-06-05
+
+### Fixed
+
+- Background SSO session refresh no longer fails on every cycle and, in
+  the worst case, no longer spins in a tight loop spawning `aws` and
+  flooding the terminal. Two causes: the `aws sso-oidc create-token`
+  call passed credentials as separate args, so a cached client id that
+  starts with `-` was parsed by the AWS CLI as another option
+  (`argument --client-id: expected one argument`); these are now passed
+  in `--opt=value` form. And the refresher's sleep could compute to
+  zero once inside the refresh buffer, so a failing refresh retried
+  instantly; a 60 second floor now prevents any busy-loop.
+
 ## [1.7.1] - 2026-05-26
 
 ### Changed

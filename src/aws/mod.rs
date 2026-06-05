@@ -255,21 +255,22 @@ impl AwsManager {
             }
         }
 
-        // Call sso-oidc create-token with the refresh token
+        // Call sso-oidc create-token with the refresh token.
+        //
+        // Values are passed in `--opt=value` form rather than as two
+        // separate args. AWS CLI (argparse) treats a value that starts
+        // with `-` as another option when the two-arg form is used, and
+        // fails with "expected one argument". The `=` form binds the
+        // value unambiguously regardless of its leading character.
         let output = Command::new("aws")
             .args([
                 "sso-oidc",
                 "create-token",
-                "--client-id",
-                client_id,
-                "--client-secret",
-                client_secret,
-                "--grant-type",
-                "refresh_token",
-                "--refresh-token",
-                refresh_token,
-                "--region",
-                &profile_info.sso_region,
+                &format!("--client-id={client_id}"),
+                &format!("--client-secret={client_secret}"),
+                "--grant-type=refresh_token",
+                &format!("--refresh-token={refresh_token}"),
+                &format!("--region={}", profile_info.sso_region),
             ])
             .env("AWS_CLI_AUTO_PROMPT", "off")
             .env("AWS_PAGER", "")
@@ -932,6 +933,58 @@ exit 255
 
             let mgr = manager_with_cache_dir(&cache_dir);
             assert!(!mgr.try_refresh_token(&profile()));
+        }
+
+        // -- argument form ----------------------------------------------------
+
+        /// Stub that only succeeds if `--client-id` arrives in `--opt=value`
+        /// form. Mirrors the AWS CLI rejecting a bare `--client-id <value>`
+        /// when the value starts with `-`.
+        const STUB_REQUIRES_EQ_FORM: &str = r#"#!/bin/sh
+for arg in "$@"; do
+    case "$arg" in
+        --client-id=*) found=1 ;;
+        --client-id) echo "bare --client-id flag, value parsed as option" >&2; exit 252 ;;
+    esac
+done
+if [ "$found" = 1 ]; then
+    cat <<'JSON'
+{"accessToken":"new-access","expiresIn":28800,"refreshToken":"new-refresh"}
+JSON
+    exit 0
+fi
+echo "no --client-id seen" >&2
+exit 252
+"#;
+
+        #[test]
+        #[serial]
+        fn refresh_passes_client_id_in_eq_form() {
+            // Regression: a client id that starts with `-` made the AWS CLI
+            // read `--client-id` as having no value ("expected one argument"),
+            // so refresh failed forever. We now pass `--client-id=VALUE`.
+            let (_guard, _stub) = install_aws_stub(STUB_REQUIRES_EQ_FORM);
+
+            let tmp = tempfile::TempDir::new().unwrap();
+            let cache_dir = tmp.path().join("cache");
+            fs::create_dir_all(&cache_dir).unwrap();
+            let cache = r#"{
+                "startUrl": "https://acme.awsapps.com/start",
+                "region": "ap-southeast-2",
+                "accessToken": "old-access",
+                "expiresAt": "2026-01-01T00:00:00Z",
+                "clientId": "-leading-dash-client-id",
+                "clientSecret": "shh",
+                "registrationExpiresAt": "2099-01-01T00:00:00Z",
+                "refreshToken": "old-refresh"
+            }"#;
+            fs::write(cache_dir.join("entry.json"), cache).unwrap();
+
+            let mgr = manager_with_cache_dir(&cache_dir);
+            assert!(
+                mgr.try_refresh_token(&profile()),
+                "refresh should succeed when client id is passed in = form"
+            );
         }
     }
 }

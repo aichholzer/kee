@@ -272,6 +272,10 @@ impl Drop for Spinner {
 const REFRESH_BUFFER_SECS: i64 = 300;
 /// Fallback sleep duration if expiry can't be read, in seconds.
 const REFRESH_FALLBACK_SECS: u64 = 1800;
+/// Minimum gap between refresh attempts. Floors the computed sleep so a
+/// token that is already inside the buffer (or a refresh that keeps
+/// failing) can never spin the loop with zero delay.
+const REFRESH_MIN_INTERVAL_SECS: u64 = 60;
 
 /// Background thread that keeps the SSO session fresh while a sub-shell is active.
 struct SessionRefresher {
@@ -289,11 +293,13 @@ impl SessionRefresher {
                     Some(expires_at) => {
                         let remaining =
                             (expires_at - chrono::Utc::now()).num_seconds() - REFRESH_BUFFER_SECS;
-                        // If we're already within the buffer, refresh immediately.
+                        // If we're already within the buffer, refresh soon, but
+                        // never sooner than the floor below.
                         remaining.max(0) as u64
                     }
                     None => REFRESH_FALLBACK_SECS,
-                };
+                }
+                .max(REFRESH_MIN_INTERVAL_SECS);
 
                 // Sleep in short ticks so we exit promptly when signalled.
                 let mut slept = 0u64;
