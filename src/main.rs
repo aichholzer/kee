@@ -276,6 +276,13 @@ const REFRESH_FALLBACK_SECS: u64 = 1800;
 /// token that is already inside the buffer (or a refresh that keeps
 /// failing) can never spin the loop with zero delay.
 const REFRESH_MIN_INTERVAL_SECS: u64 = 60;
+/// On a failed background refresh, retry this many times before alarming.
+/// Failures are often transient: a sibling profile sharing the same SSO
+/// session rotating the single-use refresh token, or the network still
+/// coming up after a laptop wake.
+const REFRESH_RETRY_ATTEMPTS: u32 = 3;
+/// Delay between background-refresh retries, in seconds.
+const REFRESH_RETRY_DELAY_SECS: u64 = 5;
 
 /// Background thread that keeps the SSO session fresh while a sub-shell is active.
 struct SessionRefresher {
@@ -318,7 +325,28 @@ impl SessionRefresher {
                     "background refresher: attempting refresh for '{}' (slept {sleep_secs}s)",
                     profile_info.profile_name
                 );
-                let ok = aws_manager.try_refresh_token(&profile_info);
+                // A failed refresh is often transient: another process (the AWS
+                // SDK, terraform, or a sibling profile sharing this SSO session)
+                // may have just rotated the single-use refresh token, or the
+                // network is still coming up after a laptop wake. Retry a few
+                // times, re-reading the cache each attempt so we pick up a
+                // token a sibling already rotated, before alarming.
+                let mut ok = aws_manager.try_refresh_token(&profile_info);
+                let mut attempt = 1u32;
+                while !ok && attempt < REFRESH_RETRY_ATTEMPTS && running.load(Ordering::Relaxed) {
+                    aws::vlog!(
+                        "background refresher: refresh for '{}' failed, retry {attempt}/{}",
+                        profile_info.profile_name,
+                        REFRESH_RETRY_ATTEMPTS - 1
+                    );
+                    let mut slept = 0u64;
+                    while slept < REFRESH_RETRY_DELAY_SECS && running.load(Ordering::Relaxed) {
+                        thread::sleep(Duration::from_secs(1));
+                        slept += 1;
+                    }
+                    ok = aws_manager.try_refresh_token(&profile_info);
+                    attempt += 1;
+                }
                 aws::vlog!(
                     "background refresher: refresh for '{}' -> {}",
                     profile_info.profile_name,

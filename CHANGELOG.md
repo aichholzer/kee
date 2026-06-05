@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.3] - 2026-06-05
+
+### Fixed
+
+- The background SSO session refresher no longer alarms on a single
+  transient failure. Most refresh failures are transient (a sibling
+  profile sharing the same SSO session can rotate the single-use
+  refresh token between cycles, or the network is still coming up
+  after a laptop wake). The refresher now retries up to three times,
+  five seconds apart, re-reading the cache on each attempt so a
+  sibling's rotation is picked up. The user-facing alarm only fires if
+  the session is genuinely dead. Verbose logs each retry, preserving
+  the diagnostic trail.
+
 ## [1.7.2] - 2026-06-05
 
 ### Fixed
