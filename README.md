@@ -24,7 +24,7 @@ A simple tool to help you manage multiple AWS profiles, with SSO support and eas
 - 🔍 **Profile management**: Easily list, add, update, and remove profiles
 - 🚫 **No stored credentials**: No AWS credentials are stored anywhere - uses AWS SSO tokens
 - 🎨 **Shell integration**: Shows current profile in your shell prompt
-- ⚡ **Auto-refresh**: Proactively refreshes tokens on every use and keeps sessions alive in the background
+- ⚡ **On-demand credentials**: Lets the AWS CLI and SDKs refresh SSO tokens when they expire; no competing background refresh
 - 🚨 **Production safety**: Mark accounts as production to get a visible warning banner
 
 ## Security notes
@@ -165,7 +165,7 @@ aws:mycompany.dev $ exit  # Terminate the session and return to your main shell
 
 These flags work with any command:
 
-- `-v`, `--verbose`: Print diagnostic detail to stderr (AWS CLI errors, refresh outcomes, cache parsing issues). Useful when something silently fails.
+- `-v`, `--verbose`: Print diagnostic detail to stderr (AWS CLI errors, cache parsing issues). Useful when something silently fails.
 - `-V`, `--version`: Print the installed version and exit.
 - `-h`, `--help`: Show help. Works on subcommands too (e.g., `kee use --help`).
 
@@ -192,7 +192,7 @@ kee use                # Pick interactively with fuzzy search
 kee use PROFILE_NAME   # Skip the picker
 ```
 
-Use a profile and start a sub-shell with its AWS credentials. With no name, Kee opens a fuzzy picker over your configured profiles. Every `kee use` proactively refreshes the token to give you the maximum session window.
+Use a profile and start a sub-shell with its AWS credentials. With no name, Kee opens a fuzzy picker over your configured profiles. If the session has expired, Kee runs `aws sso login` first.
 
 ### Run a single command
 
@@ -302,27 +302,29 @@ Install drops the completion script in the right place and edits your shell conf
 
 When you use a profile, `Kee`:
 
-1. Validates SSO credentials (refreshes if needed)
+1. Validates SSO credentials (runs `aws sso login` if expired)
 2. Updates shell prompt to show current profile
 3. Starts a new shell session
 4. Cleans up when you exit
 
 ### Session management
 
-When you run `kee use`, your session is refreshed proactively — every invocation gives you the maximum session window regardless of how much time was left.
+When you run `kee use`, `Kee` checks the session is usable. If the SSO token has expired, it runs `aws sso login` for you. Otherwise it launches straight into the sub-shell.
 
-While the sub-shell is active, a background process monitors the token's expiry and refreshes it automatically before it lapses. This means your session stays alive indefinitely as long as the sub-shell is open (limited only by the refresh token registration, typically ~3 months).
+`Kee` does not refresh or rotate SSO tokens itself. Once you are in the sub-shell, the AWS CLI and SDKs (and tools built on them, like Terraform) refresh the SSO token on demand when it expires, using the standard AWS credential chain. Your session stays alive for as long as AWS allows (the refresh token's validity, typically the SSO session's maximum duration), handled entirely by the official tooling.
 
-If the refresh token is expired or unavailable, `Kee` falls back to the full `aws sso login` flow.
+This is deliberate. SSO refresh tokens are single-use and rotate on every refresh. An earlier version of `Kee` refreshed tokens proactively in a background thread, which raced the AWS SDK over the same single-use token and caused intermittent `InvalidGrantException` failures in tools like Terraform. `Kee` now stays out of the way and lets the SDK manage refresh.
 
 ```
- ⠹ Refreshing session...
- [✓] Session refreshed.
+ ⠹ Checking session...
+ [✓] Session is valid.
 
  Profile: mycompany.dev
  Kee is starting a sub-shell...
  Type exit to return to your main shell.
 ```
+
+If the session has expired, `Kee` runs the full `aws sso login` flow before launching.
 
 `Kee` also prevents you from starting a sub-shell while already in one:
 

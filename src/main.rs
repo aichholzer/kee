@@ -268,112 +268,6 @@ impl Drop for Spinner {
     }
 }
 
-/// Buffer before token expiry at which we refresh, in seconds.
-const REFRESH_BUFFER_SECS: i64 = 300;
-/// Fallback sleep duration if expiry can't be read, in seconds.
-const REFRESH_FALLBACK_SECS: u64 = 1800;
-/// Minimum gap between refresh attempts. Floors the computed sleep so a
-/// token that is already inside the buffer (or a refresh that keeps
-/// failing) can never spin the loop with zero delay.
-const REFRESH_MIN_INTERVAL_SECS: u64 = 60;
-/// On a failed background refresh, retry this many times before alarming.
-/// Failures are often transient: a sibling profile sharing the same SSO
-/// session rotating the single-use refresh token, or the network still
-/// coming up after a laptop wake.
-const REFRESH_RETRY_ATTEMPTS: u32 = 3;
-/// Delay between background-refresh retries, in seconds.
-const REFRESH_RETRY_DELAY_SECS: u64 = 5;
-
-/// Background thread that keeps the SSO session fresh while a sub-shell is active.
-struct SessionRefresher {
-    #[allow(dead_code)]
-    thread: BackgroundThread,
-}
-
-impl SessionRefresher {
-    fn start(aws_manager: AwsManager, profile_info: ProfileInfo) -> Self {
-        let thread = BackgroundThread::spawn(move |running| {
-            let mut last_ok = true;
-            while running.load(Ordering::Relaxed) {
-                // Decide how long to sleep based on the current token expiry.
-                let sleep_secs = match aws_manager.read_token_expiry(&profile_info) {
-                    Some(expires_at) => {
-                        let remaining =
-                            (expires_at - chrono::Utc::now()).num_seconds() - REFRESH_BUFFER_SECS;
-                        // If we're already within the buffer, refresh soon, but
-                        // never sooner than the floor below.
-                        remaining.max(0) as u64
-                    }
-                    None => REFRESH_FALLBACK_SECS,
-                }
-                .max(REFRESH_MIN_INTERVAL_SECS);
-
-                // Sleep in short ticks so we exit promptly when signalled.
-                let mut slept = 0u64;
-                while slept < sleep_secs && running.load(Ordering::Relaxed) {
-                    thread::sleep(Duration::from_secs(1));
-                    slept += 1;
-                }
-
-                if !running.load(Ordering::Relaxed) {
-                    break;
-                }
-
-                // Refresh. Surface state transitions to the user via stderr so a
-                // silently-dying session is at least visible in the sub-shell.
-                aws::vlog!(
-                    "background refresher: attempting refresh for '{}' (slept {sleep_secs}s)",
-                    profile_info.profile_name
-                );
-                // A failed refresh is often transient: another process (the AWS
-                // SDK, terraform, or a sibling profile sharing this SSO session)
-                // may have just rotated the single-use refresh token, or the
-                // network is still coming up after a laptop wake. Retry a few
-                // times, re-reading the cache each attempt so we pick up a
-                // token a sibling already rotated, before alarming.
-                let mut ok = aws_manager.try_refresh_token(&profile_info);
-                let mut attempt = 1u32;
-                while !ok && attempt < REFRESH_RETRY_ATTEMPTS && running.load(Ordering::Relaxed) {
-                    aws::vlog!(
-                        "background refresher: refresh for '{}' failed, retry {attempt}/{}",
-                        profile_info.profile_name,
-                        REFRESH_RETRY_ATTEMPTS - 1
-                    );
-                    let mut slept = 0u64;
-                    while slept < REFRESH_RETRY_DELAY_SECS && running.load(Ordering::Relaxed) {
-                        thread::sleep(Duration::from_secs(1));
-                        slept += 1;
-                    }
-                    ok = aws_manager.try_refresh_token(&profile_info);
-                    attempt += 1;
-                }
-                aws::vlog!(
-                    "background refresher: refresh for '{}' -> {}",
-                    profile_info.profile_name,
-                    if ok { "ok" } else { "failed" }
-                );
-                match (last_ok, ok) {
-                    (true, false) => {
-                        eprintln!(
-                            "\n Kee: background session refresh failed for '{}'.\n      Run 'aws sso login --profile {}' if AWS calls start failing.",
-                            profile_info.profile_name, profile_info.profile_name
-                        );
-                    }
-                    (false, true) => {
-                        eprintln!(
-                            "\n Kee: background session refresh recovered for '{}'.",
-                            profile_info.profile_name
-                        );
-                    }
-                    _ => {}
-                }
-                last_ok = ok;
-            }
-        });
-        Self { thread }
-    }
-}
-
 impl KeeManager {
     fn prompt_user(&self, message: &str) -> io::Result<bool> {
         // In an interactive terminal, use dialoguer for visual consistency
@@ -716,15 +610,12 @@ impl KeeManager {
         let profile_info = config.profiles.get(profile_name).unwrap().clone();
         let profile_name = profile_info.profile_name.clone();
 
-        // Always attempt a token refresh to maximise session duration
+        // Validate the session. We don't proactively rotate the SSO token;
+        // the AWS CLI/SDK refresh it on demand when it expires. We just check
+        // the session is usable and, if not, run a full SSO login.
         println!();
-        let spinner = Spinner::start("Refreshing session...");
-        let refreshed = self.aws_manager.try_refresh_token(&profile_info)
-            && self.check_credentials(&profile_name);
-
-        if refreshed {
-            spinner.stop(" [✓] Session refreshed.");
-        } else if self.check_credentials(&profile_name) {
+        let spinner = Spinner::start("Checking session...");
+        if self.check_credentials(&profile_name) {
             spinner.stop(" [✓] Session is valid.");
         } else {
             spinner.stop(" [!] Session expired. Opening SSO login...");
@@ -997,8 +888,8 @@ impl KeeManager {
         };
         let aws_profile = &profile_info.profile_name;
 
-        // Try a refresh, then validate, then fall back to interactive sso login.
-        let _ = self.aws_manager.try_refresh_token(&profile_info);
+        // Validate, falling back to interactive sso login. We don't rotate
+        // the SSO token ourselves; the AWS CLI/SDK refresh it on demand.
         if !self.check_credentials(aws_profile) {
             eprintln!(
                 " Kee: session expired for '{}', running 'aws sso login'...",
@@ -1104,10 +995,6 @@ impl KeeManager {
                 cmd.env("PS1", format!("aws:{profile_name} $ "));
             }
         }
-
-        // Keep the session refreshed in the background while the sub-shell is alive.
-        // Dropped automatically when this function returns.
-        let _refresher = SessionRefresher::start(self.aws_manager.clone(), profile_info.clone());
 
         if let Err(e) = cmd.status() {
             eprintln!("\n [X] Failed to start sub-shell ({shell}): {e}");
@@ -1689,8 +1576,8 @@ fn main() -> io::Result<()> {
 
     let kee = KeeManager::new()?;
 
-    // Wire up the global verbose flag so AwsManager + SessionRefresher
-    // can react without needing the flag threaded through every call.
+    // Wire up the global verbose flag so AwsManager can react without
+    // needing the flag threaded through every call.
     if cli.verbose {
         aws::VERBOSE.store(true, std::sync::atomic::Ordering::Relaxed);
     }

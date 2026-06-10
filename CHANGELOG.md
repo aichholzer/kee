@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.4] - 2026-06-10
+
+### Changed
+
+- `Kee` no longer refreshes or rotates SSO tokens itself. The background
+  session refresher has been removed entirely, along with the proactive
+  refresh on `kee use`/`run`/`aws`/`console`. AWS SSO refresh tokens are
+  single-use and rotate on each refresh; the old background thread raced
+  the AWS SDK (Terraform, SOPS, and similar) over the same single-use
+  token, which caused intermittent `InvalidGrantException` failures in
+  those tools. `Kee` now validates the session and runs `aws sso login`
+  only when it has genuinely expired, then gets out of the way and lets
+  the AWS CLI and SDKs refresh on demand as designed. Session longevity
+  is unchanged (it was always bounded by the refresh token's validity).
+
+### Removed
+
+- The background `SessionRefresher` and the `--verbose` refresh-attempt
+  logging that went with it. The `--verbose` flag still reports AWS CLI
+  errors and cache parsing issues.
+
 ## [1.7.3] - 2026-06-05
 
 ### Fixed
