@@ -25,6 +25,10 @@ path = "src/main.rs"
 name = "kee"
 path = "src/lib.rs"
 
+[[bench]]
+name = "kee_benchmarks"
+harness = false
+
 [dependencies]
 clap = { version = "4.4", features = ["derive"] }
 clap_complete = "4.4"
@@ -43,6 +47,7 @@ mockall = "0.12"
 serial_test = "3.0"
 assert_cmd = "2.0"
 predicates = "3.1"
+criterion = { version = "5.0.0", package = "codspeed-criterion-compat" }
 
 [features]
 default = []
