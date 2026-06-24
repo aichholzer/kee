@@ -5,6 +5,7 @@
 [![Tests](https://github.com/aichholzer/kee/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/aichholzer/kee/actions/workflows/test.yml)
 [![codecov](https://codecov.io/gh/aichholzer/kee/graph/badge.svg?token=YpgPwMbazO)](https://codecov.io/gh/aichholzer/kee)
 [![Latest version](https://img.shields.io/crates/v/kee.svg)](https://crates.io/crates/kee)
+[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://app.codspeed.io/aichholzer/kee?utm_source=badge)
 ![License](https://img.shields.io/crates/l/kee.svg)<br />
 ![macOS](https://img.shields.io/badge/-macOS-black)
 ![Linux](https://img.shields.io/badge/-Linux-green)
