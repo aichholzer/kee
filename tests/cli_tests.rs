@@ -35,3 +35,7 @@ mod use_cmd;
 #[cfg(unix)]
 #[path = "cli_tests/aws_shelling.rs"]
 mod aws_shelling;
+
+#[cfg(unix)]
+#[path = "cli_tests/refresh.rs"]
+mod refresh;

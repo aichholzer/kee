@@ -39,7 +39,7 @@ const AWS_PAGER: &str = "AWS_PAGER";
 #[command(name = "kee")]
 #[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = format!("{KEE_ART}\n V. {}", env!("CARGO_PKG_VERSION")))]
-#[command(long_about = format!("{KEE_ART}\n V. {}\n\nExamples:\n  kee                        Show current profile or this help\n  kee add myprofile          Add a new AWS profile\n  kee use                    Pick a profile interactively (starts sub-shell)\n  kee use myprofile          Use a specific profile (starts sub-shell)\n  kee aws myprofile s3 ls    Run an AWS CLI command with a profile\n  kee run myprofile -- CMD   Run any command with a profile (no sub-shell)\n  kee console                Open the AWS console (current session or picker)\n  kee console myprofile      Open the AWS console for a specific profile\n  kee status                 Show all profiles with session status and expiry\n  kee ls                     List all available profiles\n  kee current                Show current, active profile\n  kee rm                     Pick a profile to remove interactively\n  kee rm myprofile           Remove a specific profile", env!("CARGO_PKG_VERSION")))]
+#[command(long_about = format!("{KEE_ART}\n V. {}\n\nExamples:\n  kee                        Show current profile or this help\n  kee add myprofile          Add a new AWS profile\n  kee use                    Pick a profile interactively (starts sub-shell)\n  kee use myprofile          Use a specific profile (starts sub-shell)\n  kee aws myprofile s3 ls    Run an AWS CLI command with a profile\n  kee run myprofile -- CMD   Run any command with a profile (no sub-shell)\n  kee console                Open the AWS console (current session or picker)\n  kee console myprofile      Open the AWS console for a specific profile\n  kee refresh                Refresh the current session's SSO token in place\n  kee status                 Show all profiles with session status and expiry\n  kee ls                     List all available profiles\n  kee current                Show current, active profile\n  kee rm                     Pick a profile to remove interactively\n  kee rm myprofile           Remove a specific profile", env!("CARGO_PKG_VERSION")))]
 struct Cli {
     /// Print diagnostic detail to stderr (AWS CLI errors, refresh outcomes,
     /// cache parsing issues). Useful when something silent-fails.
@@ -116,6 +116,14 @@ enum Commands {
         #[arg(
             value_name = "PROFILE_NAME",
             help = "Name of the AWS profile (defaults to current session, then interactive picker)"
+        )]
+        profile_name: Option<String>,
+    },
+    /// Refresh a profile's SSO session without leaving the sub-shell
+    Refresh {
+        #[arg(
+            value_name = "PROFILE_NAME",
+            help = "Name of the AWS profile to refresh (defaults to current session, then interactive picker)"
         )]
         profile_name: Option<String>,
     },
@@ -873,6 +881,49 @@ impl KeeManager {
         Ok(0)
     }
 
+    /// Refresh a profile's SSO session in place by running `aws sso login`.
+    /// Resolves the profile from the explicit arg, then the active session,
+    /// then the interactive picker. Because the sub-shell shares `~/.aws`, the
+    /// freshly minted token is picked up by the running session immediately,
+    /// so there's no need to exit and re-enter.
+    fn refresh_command(&self, profile_name: Option<&str>) -> io::Result<i32> {
+        // Resolve the profile to refresh: arg → active session → picker.
+        let resolved: Option<String> = match profile_name {
+            Some(n) => Some(n.to_string()),
+            None => match env::var(KEE_CURRENT_PROFILE) {
+                Ok(n) if !n.is_empty() => Some(n),
+                _ => self.pick_profile("Refresh which profile?")?,
+            },
+        };
+
+        let name = match resolved {
+            Some(n) => n,
+            None => return Ok(0),
+        };
+
+        // Map to the AWS profile name via kee config when we can. When the name
+        // came from the active session, KEE_CURRENT_PROFILE already holds the
+        // AWS profile name, so falling back to it as-is is correct.
+        let config = self.load_config();
+        let aws_profile = config
+            .profiles
+            .get(&name)
+            .map(|p| p.profile_name.clone())
+            .unwrap_or(name);
+
+        println!("\n Refreshing SSO session for {}...", hlt(&aws_profile));
+        if self.sso_login(&aws_profile)? {
+            println!(" [✓] Session refreshed for {}.", hlt(&aws_profile));
+            Ok(0)
+        } else {
+            eprintln!(
+                " [X] Failed to refresh. Try {} manually.",
+                hlt(&format!("aws sso login --profile {aws_profile}"))
+            );
+            Ok(1)
+        }
+    }
+
     fn current_profile(&self) {
         // Check if in active session
         if let Ok(current) = env::var(KEE_CURRENT_PROFILE) {
@@ -1247,7 +1298,7 @@ _kee_with_profiles() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
     case "$prev" in
-        use|rm|set|run|aws|console)
+        use|rm|set|run|aws|console|refresh)
             local profiles
             profiles=$(kee ls --names 2>/dev/null)
             COMPREPLY=( $(compgen -W "$profiles" -- "$cur") )
@@ -1266,7 +1317,7 @@ complete -F _kee_with_profiles -o bashdefault -o default kee
 function __kee_profiles
     kee ls --names 2>/dev/null
 end
-complete -c kee -n "__fish_seen_subcommand_from use rm set run aws console" -f -a "(__kee_profiles)"
+complete -c kee -n "__fish_seen_subcommand_from use rm set run aws console refresh" -f -a "(__kee_profiles)"
 "#
         }
         // PowerShell and Elvish: clap_complete output covers subcommands
@@ -1713,6 +1764,10 @@ fn main() -> io::Result<()> {
         }
         Commands::Console { profile_name } => {
             let code = kee.console_command(profile_name.as_deref())?;
+            std::process::exit(code);
+        }
+        Commands::Refresh { profile_name } => {
+            let code = kee.refresh_command(profile_name.as_deref())?;
             std::process::exit(code);
         }
         Commands::Status => {

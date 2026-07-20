@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] - 2026-07-21
+
+### Added
+
+- `kee refresh [PROFILE]` re-runs `aws sso login` for a profile without
+  leaving the sub-shell, so a session whose SSO token has lapsed can be
+  renewed in place instead of exiting and starting a new one. The profile
+  is resolved from the argument, then the active session
+  (`KEE_CURRENT_PROFILE`), then the interactive picker, mirroring
+  `kee console`. Because the sub-shell shares `~/.aws`, the running session
+  picks up the freshly minted token immediately. Tab-completion suggests
+  configured profile names for `kee refresh`.
+
 ## [1.7.5] - 2026-07-20
 
 ### Fixed
@@ -315,6 +328,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `~/.aws/config` using the modern `sso-session` format.
 - Shell completions for zsh, bash, and fish.
 
+[1.8.0]: https://github.com/aichholzer/kee.rs/compare/v1.7.5...v1.8.0
 [1.7.5]: https://github.com/aichholzer/kee.rs/compare/v1.7.4...v1.7.5
 [1.7.1]: https://github.com/aichholzer/kee.rs/compare/v1.7.0...v1.7.1
 [1.7.0]: https://github.com/aichholzer/kee.rs/compare/v1.6.3...v1.7.0

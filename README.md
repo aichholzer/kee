@@ -237,6 +237,15 @@ The destination region matches the profile's SSO region. You can navigate to oth
 
 Requires AWS CLI v2.15+ (which provides `aws configure export-credentials`).
 
+### Refresh a session
+
+```bash
+kee refresh                # Refresh the current session (or pick interactively)
+kee refresh PROFILE_NAME   # Refresh a specific profile
+```
+
+Re-runs `aws sso login` for the profile and mints a fresh SSO token. Handy when a long-running session's token has lapsed: run it from inside the sub-shell and the running session picks up the new token straight away, so there's no need to `exit` and start again. The profile is resolved from the argument, then the active session, then the interactive picker.
+
 ### List all profiles
 
 ```bash
