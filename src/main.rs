@@ -13,7 +13,7 @@ use std::thread;
 use std::time::Duration;
 
 mod aws;
-use aws::{home_dir, AwsManager, ProfileInfo};
+use aws::{home_dir, AwsManager, ProfileInfo, SessionHealth};
 
 const BOLD_WHITE: &str = "\x1b[1;37m";
 const RESET: &str = "\x1b[0m";
@@ -689,7 +689,15 @@ impl KeeManager {
             return Ok(());
         }
 
-        // Collect profile info for parallel processing.
+        // Collect profiles, then group them by the SSO token each one uses.
+        // Profiles that share an `sso-session` share a single cached SSO
+        // token whose refresh token is single-use and rotates on every
+        // refresh. Firing concurrent AWS calls for two such profiles makes
+        // them race to refresh that one token: the loser gets an
+        // InvalidGrantException and the shared cache can be left holding a
+        // consumed refresh token, which breaks unrelated tools (SOPS, the AWS
+        // CLI) until the next `aws sso login`. So we parallelise across
+        // distinct tokens but walk the profiles within a token serially.
         let profiles: Vec<(String, ProfileInfo)> = config
             .profiles
             .iter()
@@ -698,16 +706,21 @@ impl KeeManager {
 
         let current = env::var(KEE_CURRENT_PROFILE).ok();
 
-        // Spawn a thread per profile to check status concurrently.
-        let handles: Vec<_> = profiles
+        // One thread per SSO token group. Within a group the first query warms
+        // the token and the rest reuse it, so at most one refresh is ever in
+        // flight for a given token.
+        let handles: Vec<_> = group_profiles_by_session(profiles)
             .into_iter()
-            .map(|(name, info)| {
+            .map(|group| {
                 let aws_manager = self.aws_manager.clone();
-                let profile_name = info.profile_name.clone();
                 thread::spawn(move || {
-                    let expiry = aws_manager.read_token_expiry(&info);
-                    let alias = get_account_alias(&profile_name);
-                    (name, info, expiry, alias)
+                    let mut rows = Vec::with_capacity(group.len());
+                    for (name, info) in group {
+                        let health = aws_manager.read_session_health(&info);
+                        let alias = get_account_alias(&info.profile_name);
+                        rows.push((name, info, health, alias));
+                    }
+                    rows
                 })
             })
             .collect();
@@ -717,15 +730,22 @@ impl KeeManager {
         // we don't want a result-line printed before the status output.
         println!();
         let spinner = Spinner::start("Fetching session details...");
-        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let mut results: Vec<_> = handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap())
+            .collect();
         drop(spinner);
 
-        for (name, info, expiry, alias) in results {
+        // Grouping reorders profiles relative to the config, so sort by name
+        // for stable, predictable output.
+        results.sort_by(|a, b| a.0.cmp(&b.0));
+
+        for (name, info, health, alias) in results {
             let is_current = current.as_deref() == Some(&name);
             let marker = if is_current { " *" } else { "" };
 
-            // Single status line combining health and expiry.
-            let status_line = format_status_line(expiry);
+            // Single status line reflecting session health.
+            let status_line = format_status_line(health);
 
             let alias_str = alias.unwrap_or_default();
             println!(" {}{}", hlt(&name), marker);
@@ -1051,22 +1071,55 @@ fn get_account_alias(profile_name: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// Group profiles so that every profile sharing one cached SSO token lands in
+/// the same bucket. The AWS CLI caches one SSO token per `sso-session` (keyed
+/// by start URL), and that token's refresh token is single-use, so profiles in
+/// the same bucket must be queried serially to avoid racing the refresh.
+/// Profiles with no SSO start URL have no shared cache entry, so each gets its
+/// own bucket. Bucket order follows the first appearance of each key in the
+/// input, so a caller that feeds sorted input gets stable output.
+fn group_profiles_by_session(
+    profiles: Vec<(String, ProfileInfo)>,
+) -> Vec<Vec<(String, ProfileInfo)>> {
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: HashMap<String, Vec<(String, ProfileInfo)>> = HashMap::new();
+
+    for (name, info) in profiles {
+        // A profile with no SSO start URL can't share a cached token; give it
+        // a unique key (prefixed with a control char that can't appear in a
+        // URL) so it runs on its own instead of being lumped in with others.
+        let key = if info.sso_start_url.is_empty() {
+            format!("\u{1}{name}")
+        } else {
+            info.sso_start_url.clone()
+        };
+
+        if !groups.contains_key(&key) {
+            order.push(key.clone());
+        }
+        groups.entry(key).or_default().push((name, info));
+    }
+
+    order
+        .into_iter()
+        .map(|key| groups.remove(&key).expect("key was inserted above"))
+        .collect()
+}
+
 /// Render the per-profile status line shown by `kee status`. Pure function:
-/// takes the cached token's expiry (None if unreadable or absent) and the
-/// current time as anchor, returns the coloured status string.
-fn format_status_line(expiry: Option<chrono::DateTime<chrono::Utc>>) -> String {
-    format_status_line_at(expiry, chrono::Utc::now())
+/// takes the session health and the current time as anchor, returns the
+/// coloured status string.
+fn format_status_line(health: SessionHealth) -> String {
+    format_status_line_at(health, chrono::Utc::now())
 }
 
 /// Same as `format_status_line` but with an injectable anchor for testing.
-fn format_status_line_at(
-    expiry: Option<chrono::DateTime<chrono::Utc>>,
-    now: chrono::DateTime<chrono::Utc>,
-) -> String {
-    match expiry {
-        Some(exp) => {
+fn format_status_line_at(health: SessionHealth, now: chrono::DateTime<chrono::Utc>) -> String {
+    match health {
+        SessionHealth::Active(exp) => {
             let remaining = exp - now;
             if remaining.num_seconds() <= 0 {
+                // Clock skew, or the token lapsed between the read and here.
                 "\x1b[0;31m●\x1b[0m Expired".to_string()
             } else if remaining.num_hours() > 0 {
                 let h = remaining.num_hours();
@@ -1077,7 +1130,10 @@ fn format_status_line_at(
                 format!("\x1b[0;32m●\x1b[0m Active ({m} minutes remaining)")
             }
         }
-        None => "\x1b[0;31m●\x1b[0m Expired".to_string(),
+        // Access token lapsed but the session still auto-refreshes: amber, and
+        // explicitly not "Expired" so a working session doesn't look dead.
+        SessionHealth::Refreshable => "\x1b[0;33m●\x1b[0m Active (auto-refresh)".to_string(),
+        SessionHealth::Expired => "\x1b[0;31m●\x1b[0m Expired".to_string(),
     }
 }
 
@@ -1675,28 +1731,100 @@ fn main() -> io::Result<()> {
 mod tests {
     use super::*;
 
-    // -- format_status_line ---------------------------------------------------
+    // -- group_profiles_by_session --------------------------------------------
 
-    #[test]
-    fn status_line_expired_when_no_expiry_known() {
-        let s = format_status_line_at(None, chrono::Utc::now());
-        assert!(s.contains("Expired"));
+    fn profile_on(name: &str, start_url: &str) -> (String, ProfileInfo) {
+        (
+            name.to_string(),
+            ProfileInfo {
+                profile_name: name.to_string(),
+                sso_start_url: start_url.to_string(),
+                sso_region: "ap-southeast-2".to_string(),
+                sso_account_id: "123456789012".to_string(),
+                sso_role_name: "Role".to_string(),
+                session_name: "sess".to_string(),
+                production: false,
+            },
+        )
     }
 
     #[test]
-    fn status_line_expired_when_expiry_in_past() {
-        let now = chrono::Utc::now();
-        let past = now - chrono::Duration::minutes(5);
-        let s = format_status_line_at(Some(past), now);
+    fn group_collapses_shared_start_url_into_one_bucket() {
+        // Two profiles on the same SSO session share one cached token, so they
+        // must land in the same bucket to be queried serially.
+        let groups = group_profiles_by_session(vec![
+            profile_on("acme.dev", "https://acme.awsapps.com/start"),
+            profile_on("acme.prod", "https://acme.awsapps.com/start"),
+        ]);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].len(), 2);
+    }
+
+    #[test]
+    fn group_keeps_distinct_start_urls_separate() {
+        let groups = group_profiles_by_session(vec![
+            profile_on("acme", "https://acme.awsapps.com/start"),
+            profile_on("other", "https://other.awsapps.com/start"),
+        ]);
+        assert_eq!(groups.len(), 2);
+        assert!(groups.iter().all(|g| g.len() == 1));
+    }
+
+    #[test]
+    fn group_does_not_lump_empty_url_profiles_together() {
+        // Legacy profiles without a start URL don't share a cache entry, so
+        // each must get its own bucket rather than being serialised together
+        // as if they shared a token.
+        let groups = group_profiles_by_session(vec![profile_on("a", ""), profile_on("b", "")]);
+        assert_eq!(groups.len(), 2);
+    }
+
+    #[test]
+    fn group_preserves_first_seen_order() {
+        let groups = group_profiles_by_session(vec![
+            profile_on("b", "https://b.example/start"),
+            profile_on("a", "https://a.example/start"),
+            profile_on("b2", "https://b.example/start"),
+        ]);
+        assert_eq!(groups.len(), 2);
+        // First key seen is b's URL; b2 joins that bucket. a's URL is second.
+        assert_eq!(groups[0][0].0, "b");
+        assert_eq!(groups[0][1].0, "b2");
+        assert_eq!(groups[1][0].0, "a");
+    }
+
+    // -- format_status_line ---------------------------------------------------
+
+    #[test]
+    fn status_line_expired_state_renders_expired() {
+        let s = format_status_line_at(SessionHealth::Expired, chrono::Utc::now());
         assert!(s.contains("Expired"));
         assert!(!s.contains("Active"));
     }
 
     #[test]
-    fn status_line_expired_at_exact_zero_boundary() {
+    fn status_line_refreshable_reads_active_not_expired() {
+        // A lapsed-but-refreshable session must not look dead: it is the case
+        // where `aws ...` still works while the access token has expired.
+        let s = format_status_line_at(SessionHealth::Refreshable, chrono::Utc::now());
+        assert!(s.contains("Active"));
+        assert!(s.contains("auto-refresh"));
+        assert!(!s.contains("Expired"));
+    }
+
+    #[test]
+    fn status_line_active_in_past_renders_expired() {
+        let now = chrono::Utc::now();
+        let past = now - chrono::Duration::minutes(5);
+        let s = format_status_line_at(SessionHealth::Active(past), now);
+        assert!(s.contains("Expired"));
+    }
+
+    #[test]
+    fn status_line_active_at_exact_zero_boundary_renders_expired() {
         // num_seconds() <= 0 should land on Expired, not Active.
         let now = chrono::Utc::now();
-        let s = format_status_line_at(Some(now), now);
+        let s = format_status_line_at(SessionHealth::Active(now), now);
         assert!(s.contains("Expired"));
     }
 
@@ -1704,7 +1832,7 @@ mod tests {
     fn status_line_active_minutes_only_under_one_hour() {
         let now = chrono::Utc::now();
         let exp = now + chrono::Duration::minutes(45);
-        let s = format_status_line_at(Some(exp), now);
+        let s = format_status_line_at(SessionHealth::Active(exp), now);
         assert!(s.contains("Active"));
         // No "hours" string when remaining is under an hour.
         assert!(!s.contains("hours"));
@@ -1715,7 +1843,7 @@ mod tests {
     fn status_line_active_includes_hours_and_minutes() {
         let now = chrono::Utc::now();
         let exp = now + chrono::Duration::hours(2) + chrono::Duration::minutes(15);
-        let s = format_status_line_at(Some(exp), now);
+        let s = format_status_line_at(SessionHealth::Active(exp), now);
         assert!(s.contains("2 hours"));
         assert!(s.contains("15 minutes"));
     }
@@ -1725,7 +1853,7 @@ mod tests {
         // 90 minutes -> 1 hour, 30 minutes (not 1 hour, 90 minutes).
         let now = chrono::Utc::now();
         let exp = now + chrono::Duration::minutes(90);
-        let s = format_status_line_at(Some(exp), now);
+        let s = format_status_line_at(SessionHealth::Active(exp), now);
         assert!(s.contains("1 hours"));
         assert!(s.contains("30 minutes"));
     }

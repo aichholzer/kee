@@ -212,6 +212,62 @@ impl AwsManager {
         cache.expires_at?.parse::<chrono::DateTime<Utc>>().ok()
     }
 
+    /// Determine the health of a profile's SSO session from its cached token.
+    ///
+    /// A profile is not "expired" just because its access token has lapsed: the
+    /// AWS CLI and SDKs refresh the access token on demand as long as the
+    /// refresh token and client registration are still valid, and cached role
+    /// credentials keep working in the meantime. So we report three states: a
+    /// live access token (`Active`), a lapsed access token that will still
+    /// auto-refresh (`Refreshable`), and a genuinely dead session that needs a
+    /// fresh `aws sso login` (`Expired`).
+    pub fn read_session_health(&self, profile_info: &ProfileInfo) -> SessionHealth {
+        let cache_file = match self.find_sso_cache_file(profile_info) {
+            Some(p) => p,
+            None => return SessionHealth::Expired,
+        };
+        let content = match fs::read_to_string(&cache_file) {
+            Ok(c) => c,
+            Err(_) => return SessionHealth::Expired,
+        };
+        let cache: SsoTokenCache = match serde_json::from_str(&content) {
+            Ok(c) => c,
+            Err(_) => return SessionHealth::Expired,
+        };
+
+        let now = Utc::now();
+
+        // Access token still valid: the common healthy case.
+        if let Some(exp) = cache
+            .expires_at
+            .as_deref()
+            .and_then(|s| s.parse::<chrono::DateTime<Utc>>().ok())
+        {
+            if exp > now {
+                return SessionHealth::Active(exp);
+            }
+        }
+
+        // Access token has lapsed. The session is still alive if a refresh
+        // token is present and the client registration hasn't expired, since
+        // the CLI/SDK will silently mint a new access token on next use.
+        let has_refresh = cache
+            .refresh_token
+            .as_deref()
+            .is_some_and(|s| !s.is_empty());
+        let registration_live = cache
+            .registration_expires_at
+            .as_deref()
+            .and_then(|s| s.parse::<chrono::DateTime<Utc>>().ok())
+            .is_some_and(|r| r > now);
+
+        if has_refresh && registration_live {
+            SessionHealth::Refreshable
+        } else {
+            SessionHealth::Expired
+        }
+    }
+
     /// Find the SSO cache file for a given profile by matching the start URL or session name.
     fn find_sso_cache_file(&self, profile_info: &ProfileInfo) -> Option<PathBuf> {
         if !self.sso_cache_dir.exists() {
@@ -246,6 +302,21 @@ impl AwsManager {
 
         None
     }
+}
+
+/// Health of a profile's SSO session, derived from its cached token. This is
+/// distinct from "can I read an expiry timestamp": a lapsed access token with a
+/// valid refresh token is still a working session.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum SessionHealth {
+    /// Access token is valid until the given instant.
+    Active(chrono::DateTime<Utc>),
+    /// Access token has lapsed, but a refresh token and a live client
+    /// registration remain, so the CLI/SDK will refresh on demand.
+    Refreshable,
+    /// Nothing usable is cached; a full `aws sso login` is required.
+    Expired,
 }
 
 /// Represents the cached SSO token file in ~/.aws/sso/cache/
@@ -465,6 +536,94 @@ mod tests {
         assert!(mgr
             .read_token_expiry(&profile("https://acme.awsapps.com/start"))
             .is_none());
+    }
+
+    // -- read_session_health --------------------------------------------------
+
+    #[test]
+    fn session_health_active_when_access_token_valid() {
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join("cache");
+        fs::create_dir_all(&cache_dir).unwrap();
+        write_cache_file(
+            &cache_dir,
+            "ok.json",
+            r#"{"startUrl":"https://acme.awsapps.com/start","accessToken":"t","expiresAt":"2099-01-01T00:00:00Z"}"#,
+        );
+
+        let mgr = manager_with_cache(&cache_dir);
+        assert!(matches!(
+            mgr.read_session_health(&profile("https://acme.awsapps.com/start")),
+            SessionHealth::Active(_)
+        ));
+    }
+
+    #[test]
+    fn session_health_refreshable_when_expired_but_refresh_token_live() {
+        // Access token in the past, but a refresh token and a live client
+        // registration remain: the session still auto-refreshes on use.
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join("cache");
+        fs::create_dir_all(&cache_dir).unwrap();
+        write_cache_file(
+            &cache_dir,
+            "ok.json",
+            r#"{"startUrl":"https://acme.awsapps.com/start","accessToken":"t","expiresAt":"2000-01-01T00:00:00Z","refreshToken":"r","registrationExpiresAt":"2099-01-01T00:00:00Z"}"#,
+        );
+
+        let mgr = manager_with_cache(&cache_dir);
+        assert_eq!(
+            mgr.read_session_health(&profile("https://acme.awsapps.com/start")),
+            SessionHealth::Refreshable
+        );
+    }
+
+    #[test]
+    fn session_health_expired_when_lapsed_and_no_refresh_token() {
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join("cache");
+        fs::create_dir_all(&cache_dir).unwrap();
+        write_cache_file(
+            &cache_dir,
+            "ok.json",
+            r#"{"startUrl":"https://acme.awsapps.com/start","accessToken":"t","expiresAt":"2000-01-01T00:00:00Z"}"#,
+        );
+
+        let mgr = manager_with_cache(&cache_dir);
+        assert_eq!(
+            mgr.read_session_health(&profile("https://acme.awsapps.com/start")),
+            SessionHealth::Expired
+        );
+    }
+
+    #[test]
+    fn session_health_expired_when_registration_also_lapsed() {
+        // A refresh token is present but the client registration has expired,
+        // so a refresh would fail: treat the session as dead.
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join("cache");
+        fs::create_dir_all(&cache_dir).unwrap();
+        write_cache_file(
+            &cache_dir,
+            "ok.json",
+            r#"{"startUrl":"https://acme.awsapps.com/start","accessToken":"t","expiresAt":"2000-01-01T00:00:00Z","refreshToken":"r","registrationExpiresAt":"2000-06-01T00:00:00Z"}"#,
+        );
+
+        let mgr = manager_with_cache(&cache_dir);
+        assert_eq!(
+            mgr.read_session_health(&profile("https://acme.awsapps.com/start")),
+            SessionHealth::Expired
+        );
+    }
+
+    #[test]
+    fn session_health_expired_when_no_cache_file() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = manager_with_cache(&tmp.path().join("cache"));
+        assert_eq!(
+            mgr.read_session_health(&profile("https://acme.awsapps.com/start")),
+            SessionHealth::Expired
+        );
     }
 
     // -- ProfileInfo round-trip with production flag --------------------------

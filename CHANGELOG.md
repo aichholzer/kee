@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.5] - 2026-07-20
+
+### Fixed
+
+- `kee status` no longer races the single-use SSO refresh token. It
+  previously spawned one thread per profile and ran
+  `aws iam list-account-aliases` for all of them at once. Profiles that
+  share an `sso-session` share one cached SSO token, so a cold token was
+  refreshed by several of those calls simultaneously; because SSO refresh
+  tokens are single-use and rotate on every use, the concurrent refreshes
+  raced. The losers failed with `InvalidGrantException`, and the shared
+  cache could be left holding a consumed refresh token, which then broke
+  unrelated tools (SOPS, the AWS CLI) until the next `aws sso login`.
+  `kee status` now groups profiles by the SSO token they share and queries
+  each token's profiles serially, so at most one refresh is ever in flight
+  per token; distinct tokens still run in parallel. Status output is now
+  sorted by profile name for stable ordering.
+- `kee status` no longer reports a working session as `Expired`. It judged
+  health solely by the access token's expiry, so a profile whose access
+  token had lapsed showed `Expired` even though `aws ...` still worked off
+  cached role credentials and the session would auto-refresh on demand.
+  Status now reads the refresh token and client registration (already
+  present in the cached token) and reports three states: `Active` while the
+  access token is valid, `Active (auto-refresh)` when it has lapsed but a
+  refresh token and live registration remain, and `Expired` only when a
+  full `aws sso login` is genuinely required.
+
 ## [1.7.4] - 2026-06-10
 
 ### Changed
@@ -288,6 +315,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `~/.aws/config` using the modern `sso-session` format.
 - Shell completions for zsh, bash, and fish.
 
+[1.7.5]: https://github.com/aichholzer/kee.rs/compare/v1.7.4...v1.7.5
 [1.7.1]: https://github.com/aichholzer/kee.rs/compare/v1.7.0...v1.7.1
 [1.7.0]: https://github.com/aichholzer/kee.rs/compare/v1.6.3...v1.7.0
 [1.6.3]: https://github.com/aichholzer/kee.rs/compare/v1.6.2...v1.6.3
