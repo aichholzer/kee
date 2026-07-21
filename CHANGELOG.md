@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.1] - 2026-07-21
+
+### Changed
+
+- `kee status` no longer shows a time-remaining countdown. The value it
+  displayed was the SSO access token's expiry, which defaults to about an
+  hour and is refreshed automatically, so the countdown implied a session
+  was minutes from dying when it was good for far longer (bounded by the
+  permission set and portal session durations, not the access token).
+  Status now reports liveness only: `Active` when the access token is
+  valid, `Active (token lapsed, renews on use)` when it has expired but the
+  refresh token will renew it, and `Expired` when a full `aws sso login` is
+  needed. The amber state's label was reworded from the opaque
+  `auto-refresh`.
+
 ## [1.8.0] - 2026-07-21
 
 ### Added
@@ -328,6 +343,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `~/.aws/config` using the modern `sso-session` format.
 - Shell completions for zsh, bash, and fish.
 
+[1.8.1]: https://github.com/aichholzer/kee.rs/compare/v1.8.0...v1.8.1
 [1.8.0]: https://github.com/aichholzer/kee.rs/compare/v1.7.5...v1.8.0
 [1.7.5]: https://github.com/aichholzer/kee.rs/compare/v1.7.4...v1.7.5
 [1.7.1]: https://github.com/aichholzer/kee.rs/compare/v1.7.0...v1.7.1

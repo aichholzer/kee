@@ -1157,33 +1157,21 @@ fn group_profiles_by_session(
         .collect()
 }
 
-/// Render the per-profile status line shown by `kee status`. Pure function:
-/// takes the session health and the current time as anchor, returns the
-/// coloured status string.
+/// Render the per-profile status line shown by `kee status`.
+///
+/// Liveness only, no time-remaining countdown. The expiry in the SSO cache is
+/// the access token's, which defaults to about an hour and is refreshed
+/// automatically, so a countdown there implies a session is about to die when
+/// it is good for far longer. We report the state instead.
 fn format_status_line(health: SessionHealth) -> String {
-    format_status_line_at(health, chrono::Utc::now())
-}
-
-/// Same as `format_status_line` but with an injectable anchor for testing.
-fn format_status_line_at(health: SessionHealth, now: chrono::DateTime<chrono::Utc>) -> String {
     match health {
-        SessionHealth::Active(exp) => {
-            let remaining = exp - now;
-            if remaining.num_seconds() <= 0 {
-                // Clock skew, or the token lapsed between the read and here.
-                "\x1b[0;31m●\x1b[0m Expired".to_string()
-            } else if remaining.num_hours() > 0 {
-                let h = remaining.num_hours();
-                let m = remaining.num_minutes() % 60;
-                format!("\x1b[0;32m●\x1b[0m Active ({h} hours, {m} minutes remaining)")
-            } else {
-                let m = remaining.num_minutes();
-                format!("\x1b[0;32m●\x1b[0m Active ({m} minutes remaining)")
-            }
+        SessionHealth::Active => "\x1b[0;32m●\x1b[0m Active".to_string(),
+        // Access token lapsed but the refresh token will renew it on next use:
+        // amber, and explicitly not "Expired" so a working session doesn't look
+        // dead.
+        SessionHealth::Refreshable => {
+            "\x1b[0;33m●\x1b[0m Active (token lapsed, renews on use)".to_string()
         }
-        // Access token lapsed but the session still auto-refreshes: amber, and
-        // explicitly not "Expired" so a working session doesn't look dead.
-        SessionHealth::Refreshable => "\x1b[0;33m●\x1b[0m Active (auto-refresh)".to_string(),
         SessionHealth::Expired => "\x1b[0;31m●\x1b[0m Expired".to_string(),
     }
 }
@@ -1851,66 +1839,30 @@ mod tests {
     // -- format_status_line ---------------------------------------------------
 
     #[test]
-    fn status_line_expired_state_renders_expired() {
-        let s = format_status_line_at(SessionHealth::Expired, chrono::Utc::now());
-        assert!(s.contains("Expired"));
-        assert!(!s.contains("Active"));
+    fn status_line_active_renders_plain_active_without_countdown() {
+        let s = format_status_line(SessionHealth::Active);
+        assert!(s.contains("Active"));
+        assert!(!s.contains("Expired"));
+        // The misleading time-remaining countdown is gone.
+        assert!(!s.contains("remaining"));
+        assert!(!s.contains("minutes"));
     }
 
     #[test]
-    fn status_line_refreshable_reads_active_not_expired() {
-        // A lapsed-but-refreshable session must not look dead: it is the case
-        // where `aws ...` still works while the access token has expired.
-        let s = format_status_line_at(SessionHealth::Refreshable, chrono::Utc::now());
+    fn status_line_refreshable_reads_active_with_renew_note() {
+        // A lapsed-but-refreshable session must read as usable, not dead, and
+        // spell out that the token renews rather than the opaque "auto-refresh".
+        let s = format_status_line(SessionHealth::Refreshable);
         assert!(s.contains("Active"));
-        assert!(s.contains("auto-refresh"));
+        assert!(s.contains("renews"));
         assert!(!s.contains("Expired"));
     }
 
     #[test]
-    fn status_line_active_in_past_renders_expired() {
-        let now = chrono::Utc::now();
-        let past = now - chrono::Duration::minutes(5);
-        let s = format_status_line_at(SessionHealth::Active(past), now);
+    fn status_line_expired_renders_expired() {
+        let s = format_status_line(SessionHealth::Expired);
         assert!(s.contains("Expired"));
-    }
-
-    #[test]
-    fn status_line_active_at_exact_zero_boundary_renders_expired() {
-        // num_seconds() <= 0 should land on Expired, not Active.
-        let now = chrono::Utc::now();
-        let s = format_status_line_at(SessionHealth::Active(now), now);
-        assert!(s.contains("Expired"));
-    }
-
-    #[test]
-    fn status_line_active_minutes_only_under_one_hour() {
-        let now = chrono::Utc::now();
-        let exp = now + chrono::Duration::minutes(45);
-        let s = format_status_line_at(SessionHealth::Active(exp), now);
-        assert!(s.contains("Active"));
-        // No "hours" string when remaining is under an hour.
-        assert!(!s.contains("hours"));
-        assert!(s.contains("45 minutes remaining"));
-    }
-
-    #[test]
-    fn status_line_active_includes_hours_and_minutes() {
-        let now = chrono::Utc::now();
-        let exp = now + chrono::Duration::hours(2) + chrono::Duration::minutes(15);
-        let s = format_status_line_at(SessionHealth::Active(exp), now);
-        assert!(s.contains("2 hours"));
-        assert!(s.contains("15 minutes"));
-    }
-
-    #[test]
-    fn status_line_active_minutes_modulo_when_hours_present() {
-        // 90 minutes -> 1 hour, 30 minutes (not 1 hour, 90 minutes).
-        let now = chrono::Utc::now();
-        let exp = now + chrono::Duration::minutes(90);
-        let s = format_status_line_at(SessionHealth::Active(exp), now);
-        assert!(s.contains("1 hours"));
-        assert!(s.contains("30 minutes"));
+        assert!(!s.contains("Active"));
     }
 
     // -- url_encode -----------------------------------------------------------

@@ -237,14 +237,17 @@ impl AwsManager {
 
         let now = Utc::now();
 
-        // Access token still valid: the common healthy case.
+        // Access token still valid: the common healthy case. We don't surface
+        // the expiry itself: it's the ~1 hour access token that the CLI/SDK
+        // refreshes automatically, so a countdown there would misrepresent how
+        // long the session is actually good for.
         if let Some(exp) = cache
             .expires_at
             .as_deref()
             .and_then(|s| s.parse::<chrono::DateTime<Utc>>().ok())
         {
             if exp > now {
-                return SessionHealth::Active(exp);
+                return SessionHealth::Active;
             }
         }
 
@@ -310,10 +313,10 @@ impl AwsManager {
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionHealth {
-    /// Access token is valid until the given instant.
-    Active(chrono::DateTime<Utc>),
+    /// Access token is currently valid.
+    Active,
     /// Access token has lapsed, but a refresh token and a live client
-    /// registration remain, so the CLI/SDK will refresh on demand.
+    /// registration remain, so the CLI/SDK will renew it on next use.
     Refreshable,
     /// Nothing usable is cached; a full `aws sso login` is required.
     Expired,
@@ -552,10 +555,10 @@ mod tests {
         );
 
         let mgr = manager_with_cache(&cache_dir);
-        assert!(matches!(
+        assert_eq!(
             mgr.read_session_health(&profile("https://acme.awsapps.com/start")),
-            SessionHealth::Active(_)
-        ));
+            SessionHealth::Active
+        );
     }
 
     #[test]
